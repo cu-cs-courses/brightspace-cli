@@ -80,6 +80,21 @@ def stored_rich(v):
         return {"Text": re.sub(r"<[^>]+>", "", c) if is_html else c, "Html": c if is_html else ""}
     return {"Text": "", "Html": ""}
 
+def enrolled(ou, name, role="Instructor", end="2099-12-26T04:59:00.000Z"):
+    return {"OrgUnit": {"Id": ou, "Code": f"{ou}.202630", "Name": name},
+            "Access": {"IsActive": True, "ClasslistRoleName": role, "EndDate": end}}
+# myenrollments, two pages of it. A past term's course, a sandbox and a course
+# taken rather than taught are what init has to leave out; the trailing space
+# is one the live instance has.
+ENROLLED = [
+    [enrolled(OU, "CMSC-240-01-Fall 2026 - Parallel C"),
+     enrolled(900240, "CMSC-240-01-Spring 2026 - Parallel C", end="2026-05-20T03:59:00.000Z"),
+     enrolled(1000999, "Devshell Parallel C - Ada Lovelace", role="Staff", end=None)],
+    [enrolled(1000120, "CMSC-120-01-Fall 2026 - OOP in Java "),
+     enrolled(1000115, "CMSC-115-01-Fall 2026 - Python"),
+     enrolled(1000116, "CMSC-115-02-Fall 2026 - Python"),
+     enrolled(1000777, "Center for Teaching and Learning", role="Participant", end=None)]]
+
 ATTEMPTS = [{"AttemptId": 1, "UserId": 10, "Completed": OLD}, {"AttemptId": 2, "UserId": 10, "Completed": OLD},
             {"AttemptId": 3, "UserId": 11, "Completed": OLD}, {"AttemptId": 4, "UserId": 12, "Completed": None}]
 
@@ -125,11 +140,9 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"Identifier": "77", "FirstName": "Ada", "LastName": "Lovelace", "UniqueName": "alovelace"})
         if p == "/d2l/api/lp/1.63/enrollments/myenrollments/":
             assert q.get("orgUnitTypeId") == ["3"], q
-            if q.get("bookmark") == ["b1"]:
-                return self.send(200, {"PagingInfo": {"Bookmark": "b2", "HasMoreItems": False},
-                                       "Items": [{"OrgUnit": {"Id": 1000120, "Code": "CMSC-120", "Name": "OOP in Java"}, "Access": {"IsActive": True, "ClasslistRoleName": "Instructor"}}]})
-            return self.send(200, {"PagingInfo": {"Bookmark": "b1", "HasMoreItems": True},
-                                   "Items": [{"OrgUnit": {"Id": OU, "Code": "CMSC-240", "Name": "Parallel C"}, "Access": {"IsActive": True, "ClasslistRoleName": "Instructor"}}]})
+            last = q.get("bookmark") == ["b1"]
+            return self.send(200, {"PagingInfo": {"Bookmark": "b2" if last else "b1", "HasMoreItems": not last},
+                                   "Items": ENROLLED[1 if last else 0]})
         base = f"/d2l/api/le/1.99/{OU}/"
         if not p.startswith(base): return self.send(404, {"Errors": [{"Message": "no such org unit"}]})
         r = p[len(base):]
@@ -434,6 +447,58 @@ def host_with(**extra):
 hosts = host_with(), host_with(BRIGHTSPACE_COURSES=str(conf / "none.ini"))
 print("   the host, from the first site and then the default:", hosts)
 fails += hosts != ("https://example.brightspace.com", "https://commonwealthu.brightspace.com")
+
+# --- init: the two files, written from the enrollments --------------------------
+# A tree of sites to search: a worktree naming the same course with a longer
+# path, a site naming its sections only, and three a search must not reach.
+fresh = pathlib.Path(tempfile.mkdtemp())
+tree = fresh / "courses"
+def a_site(where, brightspace, extra=""):
+    (where).mkdir(parents=True)
+    (where / "_quarto.yml").write_text(
+        f'urls:\n  site: "https://example.edu/x"\n  brightspace: "{brightspace}"\n{extra}')
+home = "https://example.brightspace.com/d2l/home/"
+a_site(tree / "cmsc-240" / "website", home + str(OU))
+(tree / "cmsc-240" / "dropbox").mkdir()
+a_site(tree / "cmsc-240-a-worktree" / "website", home + str(OU))
+a_site(tree / "cmsc-115" / "site", "https://example.brightspace.com/d2l/login",
+       f'  sections:\n    - tag: "01"\n      brightspace: "{home}1000115"\n'
+       f'    - tag: "02"\n      brightspace: "{home}1000116"\n')
+a_site(tree / ".hidden" / "website", home + "1000120")
+a_site(tree / "a" / "b" / "c" / "website", home + "1000120")
+elsewhere = pathlib.Path(tempfile.mkdtemp())
+a_site(elsewhere / "website", home + "1000120")
+(tree / "linked").symlink_to(elsewhere)
+made = fresh / "conf" / "brightspace"
+init_env = {"XDG_CONFIG_HOME": str(fresh / "conf"), "BRIGHTSPACE_COURSES": str(made / "courses.ini")}
+want = ["# CMSC-240-01-Fall 2026 - Parallel C\n[240]\nsite = " + str(tree / "cmsc-240" / "website")
+        + "\ndropbox = " + str(tree / "cmsc-240" / "dropbox") + "\n\n",
+        "# CMSC-120-01-Fall 2026 - OOP in Java\n[120]\nou = 1000120\n\n",
+        "[115-01]\nsite = " + str(tree / "cmsc-115" / "site") + "\nou = 1000115\n",
+        "[115-02]\nsite = " + str(tree / "cmsc-115" / "site") + "\nou = 1000116\n",
+        f"[ada]\nstate = {state}\n"]
+gone = ["900240", "Spring", "Devshell", "Teaching", "worktree", ".hidden", "/a/b/c", "linked", str(elsewhere)]
+run("init", "--sites", str(tree), "--dry-run", extra=init_env, has=want, lacks=gone)
+fails += made.exists(); print("   --dry-run wrote nothing:", not made.exists())
+run("init", "--sites", str(tree), extra=init_env,
+    has=[f"wrote {made / 'courses.ini'}: 240, 120, 115-01, 115-02, 3 with a site",
+         f"wrote {made / 'keepalive.ini'}, mode 0600: this session, as [ada]"])
+fails += oct((made / "keepalive.ini").stat().st_mode & 0o777) != "0o600" or oct(made.stat().st_mode & 0o777) != "0o700"
+print("   keepalive.ini 0600 in a 0700 directory:", oct((made / "keepalive.ini").stat().st_mode & 0o777), oct(made.stat().st_mode & 0o777))
+fails += not all(w in (made / "courses.ini").read_text() + (made / "keepalive.ini").read_text() for w in want)
+# What init wrote is what the commands read.
+run("courses", extra=init_env, has=[f"{OU}  240", "1000115  115-01", "1000116  115-02", "1000120  120"])
+run("folders", "240", extra=init_env, has=["7001  My journal"])
+run("keepalive", extra=init_env, has=["ada  alive: alovelace"])
+# A second run touches neither, and says what each lacks.
+run("init", "--sites", str(tree), extra=init_env,
+    has=["courses.ini exists, left alone; it names every course you teach",
+         "keepalive.ini exists, left alone; it has this session"])
+(made / "courses.ini").write_text((made / "courses.ini").read_text().replace("[120]\nou = 1000120\n", ""))
+(made / "keepalive.ini").write_text("[colleague]\ncookies = d2lSessionVal=a; d2lSecureSessionVal=b\n")
+run("init", extra=init_env,
+    has=["not in it yet:\n\n# CMSC-120-01-Fall 2026 - OOP in Java\n[120]\nou = 1000120",
+         f"this session is not in it:\n\n[ada]\nstate = {state}"])
 run("folders", "240", has=["7001  My journal", "555   Assignment 4", "hidden", "7/10", "2026-09-23 23:59"])
 run("--json", "folders", "240", has=['"TotalUsersWithSubmissions": 7'])
 t = run("journal", "240", "--no-write", has=["Rita Solberg", "The loop part was new to me.", "The rest was review.", "Tomas Weber", "2 entries from 2 students"], lacks=["old entry"])
@@ -511,6 +576,22 @@ if COOKIES_OK:   # a Firefox session carries no XSRF, so it cannot mint; see --p
     ACCEPT["secure"] = SECRET
     write_store(prof, SECRET)
     run("session", "--profile", str(prof), has=["read from Firefox"])
+
+    # --export: the entry for someone else's keepalive file, alone on stdout so
+    # it can go to a clipboard, and a keepalive file exactly as it stands.
+    r = subprocess.run([sys.executable, SCRIPT, "session", "--profile", str(prof), "--export"], env=env,
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL, start_new_session=True, timeout=60)
+    good = (r.returncode == 0
+            and r.stdout == f"[ada]\ncookies = d2lSessionVal={SECRET_VAL}; d2lSecureSessionVal={SECRET}\n"
+            and all(w in r.stderr for w in ["read from Firefox", "accepted: Ada Lovelace", "send it the way you would send a password"]))
+    print(("ok  " if good else "FAIL"), "session --export", f"(exit {r.returncode})")
+    if not good:
+        fails += 1; print(r.stdout + r.stderr)
+    exported = conf / "exported.ini"
+    exported.write_text(r.stdout)
+    exported.chmod(0o600)
+    run("keepalive", "--file", str(exported), has=["ada  alive: alovelace"])
+    run("session", "--token", "--export", ok=False, has=["a token is not them"])
 
 # --- the keepalive file: every session in it, each by name -------------------
 # Nothing a line holds is ever printed, so each failure below is checked for the

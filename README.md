@@ -11,9 +11,16 @@ log in through single sign-on; `--base-url` or `$BRIGHTSPACE_URL` names any
 other host.
 
     git clone https://github.com/cu-cs-courses/brightspace-cli ~/brightspace-cli
-    pip install --user lz4             # or on Nix: python3.withPackages (ps: [ ps.lz4 ])
-    ~/brightspace-cli/brightspace.py session
-    ~/brightspace-cli/brightspace.py courses
+    pip install --user lz4         # or on Nix: python3.withPackages (ps: [ ps.lz4 ])
+    cd ~/brightspace-cli
+    ./brightspace.py session       # logged in to Brightspace in Firefox first
+    ./brightspace.py init --sites ~/courses
+    ./brightspace.py folders 240
+
+`init` writes the two files the rest of this page refers to, a label for each
+course you teach and your session for the keep-alive, and `--sites` is
+optional. [Where its state lives](#where-its-state-lives) lists every file the
+tool keeps or reads.
 
 Python 3.11 or newer; the suite runs on 3.11 and 3.13.
 
@@ -21,6 +28,8 @@ Python 3.11 or newer; the suite runs on 3.11 and 3.13.
 
     ./brightspace.py session                reads the session out of Firefox; nothing to copy
     ./brightspace.py session --how          that, and every other way in
+    ./brightspace.py session --export       that, printed for someone else's keepalive file
+    ./brightspace.py init                   writes the courses file and the keepalive file
     ./brightspace.py courses                your enrollments, each with its org unit id
     ./brightspace.py folders 240            the entries: id, name, due, hidden, who has handed in
     ./brightspace.py journal 240            today's Journal entries, printed and saved
@@ -36,12 +45,42 @@ Python 3.11 or newer; the suite runs on 3.11 and 3.13.
 `--json` prints what the API returned instead of a table. `--help` on any
 command says the rest.
 
+## Where its state lives
+
+Everything the tool keeps, and everything it reads apart from Brightspace:
+
+| Path | What it holds | Written by |
+|---|---|---|
+| `~/.local/state/brightspace/` | Your session. `cookies.txt` has the two cookies; `session.json` has where they came from, the write token, the API versions, and the bearer token if `--token` gave one. Mode 0600, in a 0700 directory. | `session`, and again when a dead session is re-read from Firefox. `logout` deletes both files. |
+| `~/.config/brightspace/courses.ini` | [Your course labels](#courses). | `init`, then you. |
+| `~/.config/brightspace/keepalive.ini` | [The sessions `keepalive` pings](#keeping-sessions-alive): yours, and any a colleague hands over. Mode 0600, or it is refused. | `init` writes yours. A colleague's is the block their `session --export` prints. |
+| `~/.config/systemd/user/brightspace-keepalive.*` | The timer that runs `keepalive`, if you install it. | You, from `systemd/`. |
+| A Firefox profile's `sessionstore-backups/recovery.jsonlz4` | Where `session` finds the cookies. | Firefox. Only read here. |
+| A course site's `_quarto.yml`, `assignments.yml` and `config/brightspace.yml` | The org unit id, and what `setup` makes. | You. Only read here. |
+| A course's `dropbox/journals/` and `dropbox/submissions/` | Downloads: student work. | `journal`, `submissions --download`. |
+
+`$BRIGHTSPACE_STATE_DIR` names another session directory and
+`$BRIGHTSPACE_COURSES` another courses file; `$XDG_STATE_HOME` and
+`$XDG_CONFIG_HOME` move all three of the first files as usual. No password is
+ever kept. `login`, for a local D2L account, drops its password as soon as the
+request is sent.
+
 ## Courses
 
 A course is named by a label from `~/.config/brightspace/courses.ini` (or the
 file `$BRIGHTSPACE_COURSES` names), or by its bare org unit id — the number in
-its `/d2l/home/` URL, which `courses` lists. The file says where each course's
-files are:
+its `/d2l/home/` URL, which `courses` lists.
+
+**`init` writes the file** from your enrollments: a label for each course you
+teach that has not ended, the number in its name (`CMSC-240-01-Fall 2026` is
+`240`), with the section added when you teach several (`115-01`). `--sites
+DIR` looks under DIR, up to three directories down, for each course's website
+repo. A course found there gets its `site`, and its `dropbox` when one sits
+beside the site, as in a course directory holding `website/` and `dropbox/`.
+`init` never touches a file that exists. Run it again next term and it prints
+the sections for the courses the file does not name yet.
+
+The file says where each course's files are:
 
 ```ini
 [240]
@@ -138,13 +177,30 @@ on its own.
 
 ## Copying the two cookies by hand
 
-`session` reads Firefox by itself, so this is only for what it cannot reach:
-`session --paste` from another browser, and a colleague's session going into
-someone else's [keepalive file](#keeping-sessions-alive). A session is two
-cookies, `d2lSessionVal` and `d2lSecureSessionVal`, and both are needed. Copy
-them from the browser that is logged in to Brightspace.
+A session is two cookies, `d2lSessionVal` and `d2lSecureSessionVal`, and both
+are needed. You need them by hand to hand a session to someone else's
+[keepalive file](#keeping-sessions-alive), and for `session --paste` from a
+browser other than Firefox.
 
-**From the developer tools' cookie list:**
+**With this tool and Firefox, there is nothing to copy by hand.** Log in to
+Brightspace in Firefox, then:
+
+    ./brightspace.py session --export
+
+It takes the session the way `session` always does, checks it, and prints it as
+a keepalive entry under your first name:
+
+```ini
+[ada]
+cookies = d2lSessionVal=…; d2lSecureSessionVal=…
+```
+
+Only those two lines go to standard output, so `| wl-copy`, or `| pbcopy` on a
+Mac, puts exactly them on the clipboard. The steps below are for any other
+browser.
+
+**From the developer tools' cookie list,** in the browser that is logged in to
+Brightspace:
 
 1. Open any Brightspace page, logged in, and press F12 (⌥⌘I on a Mac).
 2. Open the list of cookies for `https://commonwealthu.brightspace.com`:
@@ -212,9 +268,11 @@ cookies = d2lSessionVal=...; d2lSecureSessionVal=...
 
 - **`state`** is a directory `session` saved a session in, and one taken from
   Firefox is re-read from there when it dies, as it would be by any command.
+  `init` writes yours.
 - **`cookies`** is a session handed over whole, in any one-line form `session
-  --paste` takes. [Copying the two cookies by
-  hand](#copying-the-two-cookies-by-hand) says where a browser keeps them.
+  --paste` takes. Its owner's `session --export` prints the entry ready to
+  paste; [Copying the two cookies by hand](#copying-the-two-cookies-by-hand)
+  covers other browsers.
   Nothing can repair one of these. Once it dies, every run says so, until
   fresh cookies replace it.
 

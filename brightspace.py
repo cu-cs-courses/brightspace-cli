@@ -890,6 +890,15 @@ def cmd_session(args):
     if args.how:
         print(HOW)
         return
+    if args.export and args.token:
+        raise Failed("--export hands over the two cookies, and a token is not them")
+    # Exporting reads Firefox or fails, rather than asking for the very cookies
+    # it is about to print; --paste still works, for another browser.
+    if args.export and not args.paste:
+        args.from_firefox = True
+    # With --export stdout carries the entry and nothing else, so that it can go
+    # straight to a clipboard; everything said along the way goes to stderr.
+    say = (lambda *a: print(*a, file=sys.stderr)) if args.export else print
     s = Session(base_url(args))
     s.forget_in_memory()
     took = None
@@ -922,8 +931,8 @@ def cmd_session(args):
             got = {"d2lSessionVal": got.get("d2lSessionVal") or first}
             got["d2lSecureSessionVal"] = ask("d2lSecureSessionVal (not echoed): ")
         if not all(got.get(c) for c in SESSION_COOKIES):
-            raise Failed("both cookies are needed. Paste them one each, or paste one string "
-                         "holding both — the Network tab's \"Copy as cURL\" is one. "
+            raise Failed("both cookies are needed. Paste them one each, or paste one line "
+                         "holding both: the value of the Cookie request header is one. "
                          "`--token` takes a bearer token instead.")
         s.take_cookies(got)
         s.meta["source"] = "paste"
@@ -942,21 +951,34 @@ def cmd_session(args):
     if not s.meta.get("xsrf") and s.meta["source"] != "token":
         s.fetch_xsrf()
     s.save()
-    print(f"read from {took}")
-    print(f"accepted: {me.get('FirstName')} {me.get('LastName')} ({me.get('UniqueName')}), "
-          f"user id {me.get('Identifier')}; API le {s.meta['le']}, lp {s.meta['lp']}; kept in {STATE}")
+    say(f"read from {took}")
+    say(f"accepted: {me.get('FirstName')} {me.get('LastName')} ({me.get('UniqueName')}), "
+        f"user id {me.get('Identifier')}; API le {s.meta['le']}, lp {s.meta['lp']}; kept in {STATE}")
     if args.xsrf:
-        print("write token: pasted")
+        say("write token: pasted")
     elif s.meta["source"] != "token":
-        print("write token: " + ("read off /d2l/home" if s.meta.get("xsrf") else
-                                 "not found on /d2l/home, so a write will say how to add one"))
+        say("write token: " + ("read off /d2l/home" if s.meta.get("xsrf") else
+                               "not found on /d2l/home, so a write will say how to add one"))
     if s.meta["source"] == "token":
-        print("A minted token lasts about an hour. When it expires, run this again.")
+        say("A minted token lasts about an hour. When it expires, run this again.")
     elif s.meta["source"] == "firefox":
-        print("Expired sessions are re-read from that profile automatically, so this should "
-              "be the last time you run this.")
+        say("Expired sessions are re-read from that profile automatically, so this should "
+            "be the last time you run this.")
     else:
-        print("This is the browser's own session: logging out there ends it here too.")
+        say("This is the browser's own session: logging out there ends it here too.")
+    if not (os.path.lexists(COURSES_FILE) or os.path.lexists(KEEPALIVE_FILE)):
+        say("Next, `brightspace.py init` writes your courses file and your keepalive file.")
+    if args.export:
+        got = s.cookies_now()
+        say("\nBelow is this session as an entry for someone else's keepalive file. It is\n"
+            "your login: send it the way you would send a password. Logging out of\n"
+            "Brightspace in this browser ends it, for them too; closing the browser does not.\n")
+        print(f"[{entry_name(me)}]\ncookies = " + "; ".join(f"{c}={got[c]}" for c in SESSION_COOKIES))
+
+
+def entry_name(me):
+    """A session's [name] in a keepalive file: its owner's first name, lower case."""
+    return re.sub(r"[^\w-]+", "", (me.get("FirstName") or "").lower()) or "me"
 
 
 def cmd_logout(args):
@@ -1108,8 +1130,182 @@ def cmd_courses(args):
                      acc.get("ClasslistRoleName", ""), "active" if acc.get("IsActive") else ""])
     emit(args, rows, ["id", "course", "code", "name", "role", ""], raw)
     if not COURSES_FILE.exists() and not args.json:
-        print(f"\nNo {COURSES_FILE} yet. A [label] there with an ou = from this list lets "
-              "every command take the label instead of the id.", file=sys.stderr)
+        print(f"\nNo {COURSES_FILE} yet. `brightspace.py init` writes one, a label for each "
+              "course you teach, so that every command can take the label instead of the id.",
+              file=sys.stderr)
+
+
+# --- the two files, written for you ---------------------------------------
+
+def taught(s):
+    """[(org unit id, name)] for each course this session teaches and that has
+    not ended, in Brightspace's order. A sandbox is Staff rather than
+    Instructor, and so is left out with the rest."""
+    _, lp = s.versions()
+    now = dt.datetime.now(dt.timezone.utc)
+    out = []
+    for item in s.paged(f"/d2l/api/lp/{lp}/enrollments/myenrollments/", {"orgUnitTypeId": "3"}):
+        ou, acc = item.get("OrgUnit") or {}, item.get("Access") or {}
+        end = local_dt(acc.get("EndDate"))
+        if "instructor" in (acc.get("ClasslistRoleName") or "").lower() and not (end and end < now):
+            out.append((ou.get("Id"), " ".join((ou.get("Name") or "").split())))
+    return out
+
+
+def course_labels(courses):
+    """org unit id -> label: the number in a name like CMSC-120-01-Fall 2026,
+    with its section added when one person teaches several, and the id itself
+    for a name that carries no number."""
+    parsed = {ou: re.match(r"[A-Za-z]{2,5}[- ]?(\d{3,4})(?:[- ](\d{2,3}))?", name) for ou, name in courses}
+    numbers = collections.Counter(m.group(1) for m in parsed.values() if m)
+    out = {}
+    for ou, m in parsed.items():
+        label = str(ou) if not m else m.group(1) if numbers[m.group(1)] == 1 or not m.group(2) \
+            else f"{m.group(1)}-{m.group(2)}"
+        out[ou] = label if label not in out.values() else str(ou)
+    return out
+
+
+def find_sites(roots):
+    """org unit id -> (site, whether its urls.brightspace names that id), for
+    every _quarto.yml no more than three directories below one of roots.
+
+    A site that names an id only deeper down, for one of its sections, is found
+    too, and its entry then needs an ou of its own. Symlinks are not followed,
+    since a course's dropbox is often one and student files are no business of
+    this search; hidden directories and _site and its kind are skipped. Where
+    two sites name one id, as a worktree beside its clone does, the shorter path
+    wins.
+    """
+    found = {}
+    for root in roots:
+        root = pathlib.Path(root).expanduser()
+        for here, dirs, files in os.walk(root):
+            depth = len(pathlib.Path(here).relative_to(root).parts)
+            dirs[:] = sorted(d for d in dirs if not d.startswith((".", "_")) and d != "node_modules") \
+                if depth < 3 else []
+            if "_quarto.yml" not in files:
+                continue
+            site = pathlib.Path(here)
+            try:
+                text = (site / "_quarto.yml").read_text()
+                own = quarto_urls(site).get("brightspace", "")
+            except (OSError, Failed):
+                continue
+            for m in re.finditer(r'brightspace:\s*"?https://[^/\s"]+/d2l/home/(\d+)', text):
+                ou = int(m.group(1))
+                if ou not in found or len(str(site)) < len(str(found[ou][0])):
+                    found[ou] = (site, own.rstrip("/").endswith(f"/d2l/home/{ou}"))
+    return found
+
+
+def tilde(path):
+    """A path as a person would write it in one of these files: ~ for home,
+    and symlinks left as they are."""
+    path = pathlib.Path(os.path.abspath(path))
+    try:
+        return "~/" + str(path.relative_to(pathlib.Path.home()))
+    except ValueError:
+        return str(path)
+
+
+def course_sections(courses, labels, sites):
+    """The courses file's sections, one list of lines per course."""
+    out = {}
+    for ou, name in courses:
+        lines = [f"# {name}", f"[{labels[ou]}]"]
+        site, own = sites.get(ou, (None, False))
+        if site:
+            lines.append(f"site = {tilde(site)}")
+            # The layout this tool grew up in: a course directory holding
+            # website/ and dropbox/ side by side.
+            if (site.parent / "dropbox").is_dir():
+                lines.append(f"dropbox = {tilde(site.parent / 'dropbox')}")
+        if not own:
+            lines.append(f"ou = {ou}")
+        out[ou] = lines
+    return out
+
+
+def private_write(path, text):
+    """A new file only readable by its owner, in a directory only its owner can
+    enter. Never over an existing one: O_EXCL makes that the kernel's check."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
+def cmd_init(args):
+    """Write the courses file and the keepalive file, whichever is missing.
+
+    The courses file gets a [label] for each course you teach that has not
+    ended, read off your enrollments: the course's number, or its number and
+    section when you teach several. --sites names directories to look in for
+    each course's website repo, a _quarto.yml no more than three levels down,
+    and a course found there gets its site, and its dropbox if one sits beside
+    the site. The keepalive file gets this session, by your first name.
+
+    A file that exists is never touched. For one that does, init prints what
+    it lacks instead: a course you teach that no label names yet, and this
+    session if it is not in the keepalive file. --dry-run prints both files
+    and writes nothing.
+    """
+    s = open_session(args)
+    me = whoami(s)
+    today = dt.date.today().isoformat()
+    courses = taught(s)
+    labels = course_labels(courses)
+    sites = find_sites(args.sites) if args.sites else {}
+    sections = course_sections(courses, labels, sites)
+    name = entry_name(me)
+    entry = f"[{name}]\nstate = {tilde(s.state)}\n"
+
+    courses_text = "\n\n".join(
+        [f"# Courses for brightspace.py, a [label] each, written by `brightspace.py init`\n"
+         f"# on {today} from the courses {me.get('FirstName')} teaches. Edit freely.\n"
+         "# site = the course's website repo, whose urls.brightspace names its org unit\n"
+         "# id; ou = the id, where the site does not name it; dropbox = where journal\n"
+         "# and submissions --download write."]
+        + ["\n".join(lines) for lines in sections.values()]) + "\n"
+    keepalive_text = (
+        f"# Sessions `brightspace.py keepalive` pings, a [name] each, written by\n"
+        f"# `brightspace.py init` on {today}. Mode 0600: each one reaches every grade its\n"
+        "# owner can. state = a directory `brightspace.py session` saved a session in;\n"
+        "# cookies = a session handed over whole, the block `brightspace.py session\n"
+        "# --export` prints on its owner's machine.\n\n"
+        + entry + "\n# [colleague]\n# cookies = d2lSessionVal=...; d2lSecureSessionVal=...\n")
+
+    if args.dry_run:
+        for path, text in ((COURSES_FILE, courses_text), (KEEPALIVE_FILE, keepalive_text)):
+            print(f"--- {path}{' (exists, would be left alone)' if os.path.lexists(path) else ''}\n{text}")
+        return
+
+    if not os.path.lexists(COURSES_FILE):
+        # 0700 whichever file comes first: the keepalive file shares the directory.
+        COURSES_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        COURSES_FILE.write_text(courses_text)
+        found = sum(1 for ou, _ in courses if ou in sites)
+        print(f"wrote {COURSES_FILE}: {', '.join(labels[ou] for ou, _ in courses) or 'no courses'}"
+              + (f", {found} with a site" if args.sites else "; --sites DIR finds their sites"))
+    else:
+        missing = [ou for ou, _ in courses if ou not in known_courses()]
+        print(f"{COURSES_FILE} exists, left alone; "
+              + ("it names every course you teach" if not missing else "not in it yet:"))
+        for ou in missing:
+            print("\n" + "\n".join(sections[ou]))
+    if not os.path.lexists(KEEPALIVE_FILE):
+        private_write(KEEPALIVE_FILE, keepalive_text)
+        print(f"wrote {KEEPALIVE_FILE}, mode 0600: this session, as [{name}]")
+    else:
+        try:
+            states = [st.resolve() for _, st, _ in keepalive_entries(KEEPALIVE_FILE) if st]
+        except Failed as e:
+            print(f"{KEEPALIVE_FILE}: {e}")
+        else:
+            print(f"{KEEPALIVE_FILE} exists, left alone; "
+                  + ("it has this session" if s.state.resolve() in states else
+                     f"this session is not in it:\n\n{entry}"))
 
 
 def cmd_folders(args):
@@ -2170,7 +2366,15 @@ def main(argv=None):
     x.add_argument("--xsrf", action="store_true",
                    help="paste XSRF.Token by hand; normally it is read off /d2l/home by itself")
     x.add_argument("--how", action="store_true", help="print where to find them and exit")
+    x.add_argument("--export", action="store_true",
+                   help="also print the session as an entry for someone else's keepalive file")
     x.set_defaults(fn=cmd_session)
+    x = sub.add_parser("init", help="write the courses file and the keepalive file, whichever is missing",
+                       description=cmd_init.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    x.add_argument("--sites", nargs="+", metavar="DIR",
+                   help="directories to look in for each course's website repo")
+    x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print both files and write nothing")
+    x.set_defaults(fn=cmd_init)
 
     x = sub.add_parser("login", help="a local D2L account; a CU account goes through single sign-on, so use `session`")
     x.add_argument("--user", help="the Brightspace username; asked for otherwise")
