@@ -355,13 +355,16 @@ print(f"cookies accepted by /d2l/api/: {COOKIES_OK}")
 
 # The prompting commands are driven in-process: getpass reads /dev/tty when there
 # is one, so a pipe on stdin is not a reliable way to answer it.
-def inproc(label, argv, answers, ok=True, has=()):
+def inproc(label, argv, answers, ok=True, has=(), extra=None, patch=None):
     global fails
     import io, contextlib, importlib, getpass as G, builtins
-    for k, v in env.items():
+    saved = dict(os.environ)
+    for k, v in {**env, **(extra or {})}.items():
         os.environ[k] = v
     sys.path.insert(0, str(pathlib.Path(SCRIPT).parent))
     b = importlib.reload(importlib.import_module("brightspace"))
+    if patch:
+        patch(b)
     fed = list(answers)
     G.getpass = lambda *a, **k: fed.pop(0)
     b.getpass.getpass = G.getpass
@@ -376,6 +379,8 @@ def inproc(label, argv, answers, ok=True, has=()):
         code = 1 if msg else (e.code or 0)
     finally:
         builtins.input = real_input
+        os.environ.clear()
+        os.environ.update(saved)
     text = buf.getvalue() + msg
     good = (code == 0) == ok and all(h in text for h in has)
     print(("ok  " if good else "FAIL"), label, f"(exit {code})")
@@ -478,11 +483,23 @@ want = ["# CMSC-240-01-Fall 2026 - Parallel C\n[240]\nsite = " + str(tree / "cms
         "[115-02]\nsite = " + str(tree / "cmsc-115" / "site") + "\nou = 1000116\n",
         f"[ada]\nstate = {state}\n"]
 gone = ["900240", "Spring", "Devshell", "Teaching", "worktree", ".hidden", "/a/b/c", "linked", str(elsewhere)]
-run("init", "--sites", str(tree), "--dry-run", extra=init_env, has=want, lacks=gone)
+run("init", "--sites", str(tree), "--dry-run", extra=init_env,
+    has=want + ["keepalive.ini (only if this machine keeps your session alive)"], lacks=gone)
 fails += made.exists(); print("   --dry-run wrote nothing:", not made.exists())
+# The keepalive file is only for a machine that runs the keep-alive, so init
+# asks; with nobody at the terminal and no flag, it writes none.
 run("init", "--sites", str(tree), extra=init_env,
     has=[f"wrote {made / 'courses.ini'}: 240, 120, 115-01, 115-02, 3 with a site",
-         f"wrote {made / 'keepalive.ini'}, mode 0600: this session, as [ada]"])
+         f"no {made / 'keepalive.ini'} written: there was nobody to ask", "--keepalive says it does"])
+run("init", "--no-keepalive", extra=init_env,
+    has=["courses.ini exists, left alone", "No keepalive file, then", "session --export"])
+a_person = lambda b: setattr(b, "interactive", lambda: True)
+inproc("init, answered no at the terminal", ["init"], ["n"], extra=init_env, patch=a_person,
+       has=["No keepalive file, then"])
+fails += (made / "keepalive.ini").exists()
+print("   no keepalive file without a yes:", not (made / "keepalive.ini").exists())
+inproc("init, answered yes at the terminal", ["init"], ["y"], extra=init_env, patch=a_person,
+       has=[f"wrote {made / 'keepalive.ini'}, mode 0600: this session, as [ada]", "Keeping sessions alive"])
 fails += oct((made / "keepalive.ini").stat().st_mode & 0o777) != "0o600" or oct(made.stat().st_mode & 0o777) != "0o700"
 print("   keepalive.ini 0600 in a 0700 directory:", oct((made / "keepalive.ini").stat().st_mode & 0o777), oct(made.stat().st_mode & 0o777))
 fails += not all(w in (made / "courses.ini").read_text() + (made / "keepalive.ini").read_text() for w in want)

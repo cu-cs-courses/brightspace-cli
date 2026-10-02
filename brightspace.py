@@ -742,6 +742,11 @@ def age_str(seconds):
     return f"{seconds / 3600:.1f}h old"
 
 
+def interactive():
+    """Whether there is a person at the terminal to answer a question."""
+    return sys.stdin.isatty()
+
+
 def ask(prompt, hidden=True):
     """One prompt. EOF means there is no terminal to read from, which is what happens
     under a timer or a pipe, so it says that rather than showing a traceback."""
@@ -1028,7 +1033,8 @@ def cmd_session(args):
     else:
         say("This is the browser's own session: logging out there ends it here too.")
     if not (os.path.lexists(COURSES_FILE) or os.path.lexists(KEEPALIVE_FILE)):
-        say("Next, `brightspace.py init` writes your courses file and your keepalive file.")
+        say("Next, `brightspace.py init` writes your courses file, and asks whether this machine "
+            "keeps your session alive.")
     if args.export:
         got = s.cookies_now()
         say("\nBelow is this session as an entry for someone else's keepalive file. It is\n"
@@ -1305,7 +1311,14 @@ def cmd_init(args):
     section when you teach several. --sites names directories to look in for
     each course's website repo, a _quarto.yml no more than three levels down,
     and a course found there gets its site, and its dropbox if one sits beside
-    the site. The keepalive file gets this session, by your first name.
+    the site.
+
+    The keepalive file is only for a machine that keeps sessions alive, with
+    a timer running `keepalive`. When someone else's keep-alive pings yours,
+    you hand it over with `session --export` and keep no file. So init asks
+    which it is, and --keepalive or --no-keepalive answers in advance; with
+    no terminal to ask at and neither given, it writes none. The file it
+    writes holds this session, under your first name.
 
     A file that exists is never touched. For one that does, init prints what
     it lacks instead: a course you teach that no label names yet, and this
@@ -1338,8 +1351,9 @@ def cmd_init(args):
         + entry + "\n# [colleague]\n# cookies = d2lSessionVal=...; d2lSecureSessionVal=...\n")
 
     if args.dry_run:
-        for path, text in ((COURSES_FILE, courses_text), (KEEPALIVE_FILE, keepalive_text)):
-            print(f"--- {path}{' (exists, would be left alone)' if os.path.lexists(path) else ''}\n{text}")
+        for path, text, when in ((COURSES_FILE, courses_text, ""),
+                                 (KEEPALIVE_FILE, keepalive_text, " (only if this machine keeps your session alive)")):
+            print(f"--- {path}{' (exists, would be left alone)' if os.path.lexists(path) else when}\n{text}")
         return
 
     if not os.path.lexists(COURSES_FILE):
@@ -1356,8 +1370,22 @@ def cmd_init(args):
         for ou in missing:
             print("\n" + "\n".join(sections[ou]))
     if not os.path.lexists(KEEPALIVE_FILE):
-        private_write(KEEPALIVE_FILE, keepalive_text)
-        print(f"wrote {KEEPALIVE_FILE}, mode 0600: this session, as [{name}]")
+        mine = args.keepalive
+        if mine is None and interactive():
+            mine = ask("\nWill this machine keep your session alive? That takes a timer here running\n"
+                       "`brightspace.py keepalive` every 15 minutes; systemd/ has one. Say no if\n"
+                       "someone else's keep-alive pings your session. [y/N] ",
+                       hidden=False).lower() in ("y", "yes")
+        if mine:
+            private_write(KEEPALIVE_FILE, keepalive_text)
+            print(f"wrote {KEEPALIVE_FILE}, mode 0600: this session, as [{name}]. "
+                  "The README's \"Keeping sessions alive\" says how to install the timer.")
+        elif mine is None:
+            print(f"no {KEEPALIVE_FILE} written: there was nobody to ask whether this machine keeps "
+                  "your session alive. --keepalive says it does.")
+        else:
+            print("No keepalive file, then. Hand your session to whoever keeps it alive: "
+                  "`brightspace.py session --export` prints the entry for their file.")
     else:
         try:
             states = [st.resolve() for _, st, _ in keepalive_entries(KEEPALIVE_FILE) if st]
@@ -2430,10 +2458,13 @@ def main(argv=None):
     x.add_argument("--export", action="store_true",
                    help="also print the session as an entry for someone else's keepalive file")
     x.set_defaults(fn=cmd_session)
-    x = sub.add_parser("init", help="write the courses file and the keepalive file, whichever is missing",
+    x = sub.add_parser("init", help="write the courses file, and the keepalive file if you keep your own session alive",
                        description=cmd_init.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     x.add_argument("--sites", nargs="+", metavar="DIR",
                    help="directories to look in for each course's website repo")
+    x.add_argument("--keepalive", action=argparse.BooleanOptionalAction,
+                   help="whether this machine keeps your session alive and so needs a keepalive file; "
+                        "asked when not given")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print both files and write nothing")
     x.set_defaults(fn=cmd_init)
 

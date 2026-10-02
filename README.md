@@ -17,10 +17,10 @@ other host.
     ./brightspace.py init --sites ~/courses
     ./brightspace.py folders 240
 
-`init` writes the two files the rest of this page refers to, a label for each
-course you teach and your session for the keep-alive, and `--sites` is
-optional. [Where its state lives](#where-its-state-lives) lists every file the
-tool keeps or reads.
+`init` writes your courses file, a label for each course you teach, and
+`--sites` is optional. It then asks whether this machine keeps your session
+alive, and writes a keepalive file only if it does. [Where its state
+lives](#where-its-state-lives) lists every file the tool keeps or reads.
 
 Python 3.11 or newer; the suite runs on 3.11 and 3.13.
 
@@ -29,7 +29,7 @@ Python 3.11 or newer; the suite runs on 3.11 and 3.13.
     ./brightspace.py session                reads the session out of Firefox; nothing to copy
     ./brightspace.py session --how          that, and every other way in
     ./brightspace.py session --export       that, printed for someone else's keepalive file
-    ./brightspace.py init                   writes the courses file and the keepalive file
+    ./brightspace.py init                   writes the courses file; asks about a keepalive file
     ./brightspace.py courses                your enrollments, each with its org unit id
     ./brightspace.py folders 240            the entries: id, name, due, hidden, who has handed in
     ./brightspace.py journal 240            today's Journal entries, printed and saved
@@ -53,7 +53,7 @@ Everything the tool keeps, and everything it reads apart from Brightspace:
 |---|---|---|
 | `~/.local/state/brightspace/` | Your session. `cookies.txt` has the two cookies; `session.json` has where they came from, the write token, the API versions, and the bearer token if `--token` gave one. Mode 0600, in a 0700 directory. | `session`, and again when a dead session is re-read from Firefox. `logout` deletes both files. |
 | `~/.config/brightspace/courses.ini` | [Your course labels](#courses). | `init`, then you. |
-| `~/.config/brightspace/keepalive.ini` | [The sessions `keepalive` pings](#keeping-sessions-alive): yours, and any a colleague hands over. Mode 0600, or it is refused. | `init` writes yours. A colleague's is the block their `session --export` prints. |
+| `~/.config/brightspace/keepalive.ini` | [The sessions `keepalive` pings](#keeping-sessions-alive): yours, and any a colleague hands over. Only on a machine that runs the keep-alive. Mode 0600, or it is refused. | `init`, with yours, when you say this machine keeps it alive. A colleague's entry is the block their `session --export` prints. |
 | `~/.config/systemd/user/brightspace-keepalive.*` | The timer that runs `keepalive`, if you install it. | You, from `systemd/`. |
 | A Firefox profile's `sessionstore-backups/recovery.jsonlz4` | Where `session` finds the cookies. | Firefox. Only read here. |
 | A course site's `_quarto.yml`, `assignments.yml` and `config/brightspace.yml` | The org unit id, and what `setup` makes. | You. Only read here. |
@@ -280,6 +280,14 @@ Every session is tried even when one fails, and the exit status is 1 if any
 did. The name is only for the output, and nothing else a line holds is ever
 printed, not even in an error about the file. A file anyone else can read is
 refused, the way ssh refuses a private key.
+
+**Only the machine that runs the keep-alive needs the file.** When someone
+else's keep-alive pings your session, hand it over with `session --export`
+and keep no file yourself. `init` asks which case yours is, and
+`--keepalive` or `--no-keepalive` answers in advance. A handed-over session
+still dies if you log out, or if the machine pinging it is off for longer than
+the idle timeout. After that, log in again and send them a fresh `session
+--export`: the copy they hold is dead, and nothing on their side can renew it.
 
 **Run it from a timer.** `systemd/` has a user unit and its timer, every
 fifteen minutes:
