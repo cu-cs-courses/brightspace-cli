@@ -1,0 +1,14 @@
+# Every 15 minutes: comfortably inside D2L's idle timeout, measured at under an
+# hour and consistent with its default of thirty minutes, with room for a missed
+# run.
+[Unit]
+Description=Ping Brightspace sessions every 15 minutes
+Documentation=https://github.com/cu-cs-courses/brightspace-cli#keeping-sessions-alive
+
+[Timer]
+OnStartupSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

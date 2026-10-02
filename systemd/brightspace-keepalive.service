@@ -1,0 +1,14 @@
+# Ping every session in ~/.config/brightspace/keepalive.ini, so that none of
+# them idles out. A user unit, started by brightspace-keepalive.timer; README.md
+# says how to install the pair.
+[Unit]
+Description=Keep Brightspace sessions from idling out
+Documentation=https://github.com/cu-cs-courses/brightspace-cli#keeping-sessions-alive
+# Nothing to keep alive until the file exists, so skip rather than fail.
+ConditionPathExists=%h/.config/brightspace/keepalive.ini
+
+[Service]
+Type=oneshot
+# The clone's path: edit this line if it is not ~/brightspace-cli. The python3
+# found here needs lz4 only to re-read a session from Firefox.
+ExecStart=/usr/bin/env python3 %h/brightspace-cli/brightspace.py keepalive --quiet
