@@ -127,10 +127,16 @@ From another browser, or to leave that file alone, paste them instead:
 
   ./brightspace.py session --paste
 
-  One paste.   F12 -> Network -> click any request to this site -> right-click ->
-               Copy -> Copy as cURL. That string carries both cookies.
-  Two pastes.  F12 -> Storage (Firefox) or Application (Chromium) -> Cookies ->
-               the Brightspace host -> d2lSessionVal, then d2lSecureSessionVal.
+  Two pastes.  F12 -> Storage (Firefox) or Application (Chrome, Edge) ->
+               Cookies -> the Brightspace host -> the Value of d2lSessionVal,
+               then of d2lSecureSessionVal. 36 characters each, here.
+  One paste.   F12 -> Network -> reload -> click the first request, the page
+               itself -> Request Headers -> the value of Cookie: one line
+               holding both. Firefox's Copy as cURL is one line and works
+               too; Chromium's spans several, and a prompt reads only the first.
+
+Both are HttpOnly, so document.cookie in the console does not show them. The
+same two values, on one line, are what a keepalive file's `cookies =` takes.
 
 Chromium cannot be read from disk the way Firefox can: it encrypts cookie values
 against the desktop keyring.
@@ -1004,7 +1010,8 @@ def keepalive_entries(path):
             got = pasted_cookies(keys["cookies"])
             missing = [c for c in SESSION_COOKIES if not got.get(c)]
             if missing:
-                raise Failed(f"{path}, [{name}]: its cookies have no {' and no '.join(missing)}")
+                raise Failed(f"{path}, [{name}]: its cookies have no {' and no '.join(missing)}; "
+                             "`brightspace.py session --how` says where a browser keeps them")
             out.append((name, None, got))
         else:
             out.append((name, file_path(path, keys["state"]), None))
@@ -1029,8 +1036,9 @@ def cmd_keepalive(args):
     `brightspace.py session` saved a session in, and a session taken from
     Firefox is re-read from there when it dies, as it would be by any command.
     `cookies` is a session handed over whole, in any one-line form `session
-    --paste` takes, a Cookie header included. Nothing can repair one of those,
-    so once it dies every run says so until fresh cookies replace it.
+    --paste` takes, a Cookie header included; `session --how` says where a
+    browser keeps the two. Nothing can repair one of those, so once it dies
+    every run says so until fresh cookies replace it.
 
     Every session is tried even when one fails, and the exit status is 1 if
     any did. --quiet prints only the failures, which is what a timer wants.

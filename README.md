@@ -103,8 +103,8 @@ it does, and it says something different when the file holds the same dead
 session, which means Firefox is logged out too.
 
 **The other ways in.** `--paste` prompts instead, which is how any other browser
-gets in: the Network tab's "Copy as cURL" carries both cookies in one paste, or
-the Storage panel has them one at a time. `--token` takes a bearer token that
+gets in; [the next section](#copying-the-two-cookies-by-hand) says where the
+cookies are. `--token` takes a bearer token that
 lasts an hour and leaves the cookies in the browser; `session --how` prints the
 console line that mints one. Chromium cannot be read from disk, because it
 encrypts cookie values against the desktop keyring. `--from-firefox` is the
@@ -136,6 +136,58 @@ it. Logging out in the browser ends a pasted cookie session too, which is the
 cheapest way to revoke it. Prefer `--token` for a one-off: it expires in an hour
 on its own.
 
+## Copying the two cookies by hand
+
+`session` reads Firefox by itself, so this is only for what it cannot reach:
+`session --paste` from another browser, and a colleague's session going into
+someone else's [keepalive file](#keeping-sessions-alive). A session is two
+cookies, `d2lSessionVal` and `d2lSecureSessionVal`, and both are needed. Copy
+them from the browser that is logged in to Brightspace.
+
+**From the developer tools' cookie list:**
+
+1. Open any Brightspace page, logged in, and press F12 (⌥⌘I on a Mac).
+2. Open the list of cookies for `https://commonwealthu.brightspace.com`:
+   - **Firefox:** the **Storage** tab, then **Cookies** in the left column,
+     then that address.
+   - **Chrome or Edge:** the **Application** tab, then **Storage → Cookies** in
+     the left column, then that address.
+
+   A tab that is not shown is under `»`.
+3. Find the row `d2lSessionVal`, double-click its **Value**, and copy it. Then
+   do the same for `d2lSecureSessionVal`.
+
+Each value is 36 characters on Commonwealth's instance, with no spaces and no
+semicolons. A longer copy picked up part of the next column.
+
+**Or both at once, from a request.** In the **Network** tab, reload the page
+and click the first request, which is the page itself. Under **Request
+Headers**, the value of `Cookie` is one line holding every cookie the site
+sets, these two among them. Copy all of it, and the tool picks out the two.
+Firefox's *Copy as cURL* is one line too and also works. Chromium's spans
+several lines, and a prompt reads only the first.
+
+**Not from the console.** Both cookies are HttpOnly, so `document.cookie` does
+not show them. The cookie list and the request headers do.
+
+**Where they go.** In a keepalive file, on one line under the session's name:
+
+```ini
+[colleague]
+cookies = d2lSessionVal=<the first value>; d2lSecureSessionVal=<the second value>
+```
+
+A whole Cookie header pasted after `cookies = ` works as well. Then run
+`brightspace.py keepalive` without `--quiet`. It should print
+`colleague  alive:` with that person's username, which also checks that these
+are the right person's cookies. For `session --paste`, answer its two prompts
+with the two values, or paste the Cookie header at the first.
+
+**Treat them as a password.** Whoever holds both is logged in as you, every
+grade included, until the session ends. With a keep-alive pinging it, it never
+ends by idling. Logging out of Brightspace in the browser they came from ends
+it, which is also how to take them back. Closing the browser does not.
+
 ## Keeping sessions alive
 
 **A session dies sooner than the login page's "180 minutes" suggests.** That
@@ -161,9 +213,10 @@ cookies = d2lSessionVal=...; d2lSecureSessionVal=...
 - **`state`** is a directory `session` saved a session in, and one taken from
   Firefox is re-read from there when it dies, as it would be by any command.
 - **`cookies`** is a session handed over whole, in any one-line form `session
-  --paste` takes: the value of the Cookie header off any request in the
-  Network tab is the easiest. Nothing can repair one of these. Once it dies,
-  every run says so, until fresh cookies replace it.
+  --paste` takes. [Copying the two cookies by
+  hand](#copying-the-two-cookies-by-hand) says where a browser keeps them.
+  Nothing can repair one of these. Once it dies, every run says so, until
+  fresh cookies replace it.
 
 Every session is tried even when one fails, and the exit status is 1 if any
 did. The name is only for the output, and nothing else a line holds is ever
