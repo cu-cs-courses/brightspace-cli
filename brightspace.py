@@ -76,6 +76,7 @@ import collections
 import datetime as dt
 import getpass
 import html
+import http.client
 import http.cookiejar
 import json
 import os
@@ -83,6 +84,7 @@ import pathlib
 import re
 import struct
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -330,10 +332,33 @@ def base_url(args, host=None):
 
 # --- the session ----------------------------------------------------------
 
+class _Answer:
+    """What CookieJar.extract_cookies wants from a response, for one that
+    http.client answered rather than urllib."""
+
+    def __init__(self, response, url):
+        self.response, self.url = response, url
+
+    def info(self):
+        return self.response.msg
+
+    def geturl(self):
+        return self.url
+
+
 class Session:
     """Cookies plus a little metadata, loaded from and saved to a state directory:
     STATE unless another is named, and none at all for a session the keepalive
     file hands over whole, which lives in memory and is never written."""
+
+    # GETs over connections kept open, one set per thread. Off unless a caller
+    # turns it on -- one that makes many small reads at once. A status report
+    # reading about sixty facts in parallel, a connection each, went from one
+    # second to ten or twenty once a few runs came close together: requests
+    # stalled for 3, 7, 11, 20 s on the way in, while one request alone took
+    # 0.1 s. Kept open, the same sixty took half a second, run after run.
+    # Writes never take this path. 2026-10-02.
+    keepalive = False
 
     def __init__(self, base, state=STATE):
         self.base = base
@@ -387,6 +412,8 @@ class Session:
             h.setdefault("X-Csrf-Token", self.meta["xsrf"])
         if self.bearer:
             h.setdefault("Authorization", "Bearer " + self.bearer)
+        if self.keepalive and method == "GET" and body is None:
+            return self.kept_get(url, h)
         req = urllib.request.Request(url, data=body, headers=h, method=method)
         try:
             with self.opener.open(req, timeout=TIMEOUT) as r:
@@ -395,6 +422,40 @@ class Session:
             return e.code, dict(e.headers), e.read(), e.geturl()
         except urllib.error.URLError as e:
             raise Failed(f"{url}: {e.reason}")
+
+    def kept_get(self, url, headers, hops=5):
+        """request() for a GET on a connection this thread keeps open.
+
+        Cookies go through the jar both ways, as urllib's opener does, and a
+        redirect is followed, as it would be. A connection the server has
+        closed in the meantime is replaced once before giving up.
+        """
+        parts = urllib.parse.urlsplit(url)
+        local = self.__dict__.setdefault("_kept", threading.local())
+        conns = local.__dict__.setdefault("conns", {})
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        self.jar.add_cookie_header(req)
+        path = parts.path + ("?" + parts.query if parts.query else "")
+        for attempt in (1, 2):
+            conn = conns.get(parts.netloc)
+            if conn is None:
+                kind = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+                conn = conns[parts.netloc] = kind(parts.netloc, timeout=TIMEOUT)
+            try:
+                conn.request("GET", path, headers=dict(req.header_items()))
+                r = conn.getresponse()
+                body = r.read()
+                break
+            except (http.client.HTTPException, OSError) as e:
+                conn.close()
+                conns.pop(parts.netloc, None)
+                if attempt == 2:
+                    raise Failed(f"{url}: {e}")
+        self.jar.extract_cookies(_Answer(r, url), req)
+        where = r.getheader("Location")
+        if r.status in (301, 302, 303, 307, 308) and where and hops:
+            return self.kept_get(urllib.parse.urljoin(url, where), headers, hops - 1)
+        return r.status, dict(r.getheaders()), body, url
 
     def api(self, path, params=None, raw=False, _minted=False, _reread=False):
         """GET one API resource as JSON (or bytes).
