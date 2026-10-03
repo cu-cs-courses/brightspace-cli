@@ -132,7 +132,13 @@ in the session store rather than in `cookies.sqlite`, so that a restarted browse
 can restore them. Measured 2026-09-26: zero rows in `cookies.sqlite` for the
 host, both cookies present in `sessionstore-backups/recovery.jsonlz4`. That file
 is mozlz4, which is what `lz4` is for. Firefox rewrites it every few seconds, so
-a login you just did can take a moment to turn up.
+a login you just did can take a moment to turn up. It reads every profile in
+`~/.mozilla/firefox`, in `~/snap/firefox/common/.mozilla/firefox` (the snap,
+which is how Ubuntu installs Firefox) and in
+`~/.var/app/org.mozilla.firefox/.mozilla/firefox` (the Flatpak), and takes the
+most recently written store. Moving to the snap copies the profiles into its own
+folder and leaves the old ones behind, so the same profile name can be in two
+places, one of them years out of date.
 
 **An expired session is re-read on its own.** Any command that gets a 403 goes
 back to the same profile once, and carries on if Firefox has a live session

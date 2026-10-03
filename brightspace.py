@@ -121,9 +121,13 @@ turn up.
 
 When the session later expires, any command re-reads that same profile and
 carries on, so this is normally a one-time step. If Firefox has been logged out
-too, log in there and the next command picks it up. --profile takes a name under
-~/.mozilla/firefox, or a path, when the right profile is not the most recently
-written one.
+too, log in there and the next command picks it up.
+
+The profiles are in ~/.mozilla/firefox, or for the snap (Ubuntu's Firefox) in
+~/snap/firefox/common/.mozilla/firefox, or for the Flatpak in
+~/.var/app/org.mozilla.firefox/.mozilla/firefox. It reads all of them and takes
+the most recently written store. --profile takes a name, or a path, when that
+is the wrong one.
 
 From another browser, or to leave that file alone, paste them instead:
 
@@ -663,7 +667,15 @@ SESSION_STORE = ("sessionstore-backups/recovery.jsonlz4",
                  "sessionstore-backups/recovery.baklz4",
                  "sessionstore.jsonlz4",
                  "sessionstore-backups/previous.jsonlz4")
-FIREFOX = pathlib.Path.home() / ".mozilla" / "firefox"
+# Where Firefox keeps its profiles: its own package, the snap (Ubuntu's Firefox),
+# the Flatpak. All of them are read and the most recently written store wins,
+# because moving to the snap copies the profiles over, names and all, and leaves
+# the originals to go stale. Found 2026-10-03: a snap Firefox with its live session
+# under ~/snap, and `session` reading only ~/.mozilla/firefox, last written in 2022.
+FIREFOX_DIRS = tuple(pathlib.Path.home() / d for d in (
+    ".mozilla/firefox",
+    "snap/firefox/common/.mozilla/firefox",
+    ".var/app/org.mozilla.firefox/.mozilla/firefox"))
 
 
 def mozlz4(path):
@@ -689,16 +701,17 @@ def firefox_stores(named=None):
     shutdown, so which one is current depends on whether it is running."""
     if named:
         prof = pathlib.Path(named).expanduser()
-        profiles = [prof if prof.is_dir() else FIREFOX / named]
-        if not profiles[0].is_dir():
+        # A name can be in more than one of them; the newest store settles it.
+        profiles = [prof] if prof.is_dir() else [d / named for d in FIREFOX_DIRS if (d / named).is_dir()]
+        if not profiles:
             raise Failed(f"no such Firefox profile: {named}")
     else:
-        profiles = [d for d in FIREFOX.glob("*") if d.is_dir()] if FIREFOX.is_dir() else []
+        profiles = [p for d in FIREFOX_DIRS if d.is_dir() for p in d.glob("*") if p.is_dir()]
         if not profiles:
-            raise Failed(f"no Firefox profile under {FIREFOX}")
+            raise Failed(f"no Firefox profile under {' or '.join(tilde(d) for d in FIREFOX_DIRS)}")
     found = [prof / rel for prof in profiles for rel in SESSION_STORE if (prof / rel).exists()]
     if not found:
-        raise Failed(f"no session store in {', '.join(p.name for p in profiles)}"
+        raise Failed(f"no session store in {', '.join(tilde(p) for p in profiles)}"
                      " — is this the profile you browse Brightspace in?")
     return sorted(found, key=lambda f: f.stat().st_mtime, reverse=True)
 
@@ -710,19 +723,22 @@ def firefox_session(base, named=None):
     every open tab's session cookies, so everything else in it is left alone.
     """
     host = urllib.parse.urlsplit(base).hostname
-    tried = []
+    tried = {}
     for path in firefox_stores(named):
         store = json.loads(mozlz4(path))
         got = {}
         for c in store.get("cookies") or []:
             if c.get("host") == host and c.get("name") in SESSION_COOKIES and c.get("value"):
                 got.setdefault(c["name"], c["value"])
+        age = dt.datetime.now().timestamp() - path.stat().st_mtime
         if all(got.get(name) for name in SESSION_COOKIES):
-            return path, dt.datetime.now().timestamp() - path.stat().st_mtime, got
-        tried.append(path.name)
-    raise Failed(f"no {host} session in Firefox ({', '.join(tried)}) — log in there first, "
-                 "and give it a moment: the session store is written every few seconds, "
-                 "not on every click")
+            return path, age, got
+        tried.setdefault(store_profile(path), []).append(f"{path.name} {age_str(age)}")
+    # Every file with its folder and its age: file names alone made a profile
+    # Firefox stopped writing years ago look like the one it is using.
+    raise Failed(f"no {host} session in Firefox — log in there first, and give it a moment: "
+                 "the session store is written every few seconds, not on every click. Read:\n"
+                 + "\n".join(f"  {tilde(prof)}: {', '.join(files)}" for prof, files in tried.items()))
 
 
 def store_profile(path):
@@ -731,7 +747,8 @@ def store_profile(path):
 
 
 def store_label(path):
-    return f"{store_profile(path).name}, {path.name}"
+    """The whole folder, since the same profile name can be in more than one."""
+    return f"{tilde(store_profile(path))}, {path.name}"
 
 
 def age_str(seconds):
@@ -739,7 +756,9 @@ def age_str(seconds):
         return f"{int(seconds)}s old"
     if seconds < 5400:
         return f"{int(seconds / 60)}m old"
-    return f"{seconds / 3600:.1f}h old"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h old"
+    return f"{int(seconds / 86400)}d old"
 
 
 def interactive():
@@ -1180,7 +1199,7 @@ def cmd_whoami(args):
     me = whoami(s)
     src = s.meta.get("source", "?")
     if src == "firefox" and s.meta.get("profile"):
-        src = f"Firefox ({pathlib.Path(s.meta['profile']).name})"
+        src = f"Firefox ({tilde(s.meta['profile'])})"
     print(f"{me.get('FirstName')} {me.get('LastName')} ({me.get('UniqueName')}), user id {me.get('Identifier')}")
     print(f"session from {src}, taken {s.meta.get('taken') or s.meta.get('logged_in', '?')}")
 
@@ -2450,7 +2469,8 @@ def main(argv=None):
                    help="type or paste the cookies instead of reading Firefox")
     x.add_argument("--from-firefox", action="store_true", dest="from_firefox",
                    help="read Firefox and fail if it has no session, rather than falling back to the prompts")
-    x.add_argument("--profile", help="which Firefox profile: a name under ~/.mozilla/firefox, or a path")
+    x.add_argument("--profile", help="which Firefox profile: a name, looked for in ~/.mozilla/firefox "
+                                     "and the snap's and Flatpak's copies of it, or a path")
     x.add_argument("--token", action="store_true", help="paste a bearer token instead of the two cookies")
     x.add_argument("--xsrf", action="store_true",
                    help="paste XSRF.Token by hand; normally it is read off /d2l/home by itself")

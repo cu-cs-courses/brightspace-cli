@@ -583,6 +583,25 @@ if COOKIES_OK:   # a Firefox session carries no XSRF, so it cannot mint; see --p
     run("session", "--profile", str(pathlib.Path(tempfile.mkdtemp()) / "gone"), ok=False,
         has=["no such Firefox profile"])
 
+    # Unnamed, it looks in every place Firefox keeps profiles. A move to the snap
+    # copies them over and leaves the originals to go stale, so the same name is in
+    # two places and only the newest store holds the session.
+    home = pathlib.Path(tempfile.mkdtemp())
+    at_home = {"HOME": str(home)}
+    stale = write_store(home / ".mozilla/firefox/abc.default-release", "")
+    years = stale.stat().st_mtime - 1460 * 86400
+    os.utime(stale, (years, years))
+    write_store(home / ".var/app/org.mozilla.firefox/.mozilla/firefox/xyz.default", "")
+    run("session", "--from-firefox", ok=False, extra=at_home,
+        has=["no 127.0.0.1 session in Firefox",
+             "~/.var/app/org.mozilla.firefox/.mozilla/firefox/xyz.default: recovery.jsonlz4 ",
+             "~/.mozilla/firefox/abc.default-release: recovery.jsonlz4 1460d old"])
+    write_store(home / "snap/firefox/common/.mozilla/firefox/abc.default-release", SECRET)
+    for named in [(), ("--profile", "abc.default-release")]:
+        run("session", "--from-firefox", *named, extra=at_home,
+            has=["read from Firefox (~/snap/firefox/common/.mozilla/firefox/abc.default-release, "
+                 "recovery.jsonlz4"])
+
     # The whole point: a session that expires is re-read without being asked.
     run("session", "--profile", str(prof), has=["read from Firefox"])
     ACCEPT["secure"] = "ROTATED"
