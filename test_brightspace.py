@@ -24,6 +24,13 @@ ACCEPT = {"secure": SECRET}
 DELETED = set()   # quiz ids a DELETE has removed
 
 
+def refused_file_types(body):
+    """As the live folder routes, measured 2026-10-03: CustomAllowableFileTypes
+    as any list is a binding error, and both file-type fields are otherwise
+    taken and ignored."""
+    return isinstance(body.get("CustomAllowableFileTypes"), list)
+
+
 def alive(quizzes):
     return [x for x in quizzes if x.get("QuizId") not in DELETED]
 COOKIES_OK = os.environ.get("MOCK_COOKIES_OK", "1") == "1"   # 0: /d2l/api/ wants the bearer
@@ -225,6 +232,9 @@ class H(BaseHTTPRequestHandler):
             return self.send(404, {"Errors": [{"Message": "no such quiz"}]})
         mf = re.fullmatch(r"dropbox/folders/(\d+)", self.path[len(base):]) if self.path.startswith(base) else None
         if mf:
+            if refused_file_types(body):
+                return self.send(400, {"title": "JSON Binding Error"})
+            body = {k: v for k, v in body.items() if k not in ("AllowableFileType", "CustomAllowableFileTypes")}
             for i, f in enumerate(FOLDERS):
                 if f["Id"] == int(mf.group(1)):
                     FOLDERS[i] = body | {k: f[k] for k in ("Id", "TotalUsers", "TotalUsersWithSubmissions") if k in f} | {
@@ -289,6 +299,10 @@ class H(BaseHTTPRequestHandler):
                 QUIZZES_MADE.append(made)
                 return self.send(200, made)
             if r == "dropbox/folders/":
+                if refused_file_types(body):
+                    return self.send(400, {"title": "JSON Binding Error"})
+                body = {k: v for k, v in body.items()
+                        if k not in ("AllowableFileType", "CustomAllowableFileTypes")}
                 made = body | {"Id": NEXT["folder"], "LinkAttachments": [],
                                "CustomInstructions": stored_rich(body.get("CustomInstructions"))}
                 NEXT["folder"] += 1
@@ -778,6 +792,16 @@ if COOKIES_OK:
     # Announcements are read, not written: see brightspace.py for why.
     run("announcements", "240", has=["Class 9, Closing Journal", "2026-09-23 15:21", "Scratch", "draft"])
     run("new-folder", "240", "Assignment 5", ok=False, has=["already exists"])
+    # A folder restricted to some file types reads them back as a list, which a
+    # write refuses outright; the clone goes without them, and says so.
+    FOLDERS.append({"Id": 557, "Name": "Only arr", "IsHidden": False, "DueDate": None,
+                    "Availability": None, "AllowableFileType": 5,
+                    "CustomAllowableFileTypes": [".arr"], "TotalUsers": 10})
+    run("new-folder", "240", "Practice", "--like", "Only arr", "--dry-run",
+        has=["takes .arr files only, which the API cannot set", "nothing sent"],
+        lacks=['"CustomAllowableFileTypes"', '"AllowableFileType"'])
+    run("new-folder", "240", "Practice", "--like", "Only arr",
+        has=["created folder 'Practice'", "checked on the server"])
     run("new-folder", "240", "Assignment 6", "--like", "nope", ok=False, has=["no entries match"])
     run("new-folder", "240", "Assignment 6", "--grade-item", "nope", ok=False,
         has=["no grade items match"])
@@ -850,6 +874,8 @@ if COOKIES_OK:
     FOLDERS.append({"Id": 4999, "Name": "Linked", "IsHidden": True, "DueDate": None, "Availability": None,
                     "LinkAttachments": [{"LinkId": 1, "LinkName": "page", "Href": "https://example.edu/a.html"}]})
     run("set-folder", "240", "Linked", "--show", ok=False, has=["carries an attachment"])
+    run("set-folder", "240", "Only arr", "--hide", ok=False,
+        has=["takes .arr files only, which the API cannot send back"])
 
 # --- deleting: only a quiz with nothing in it --------------------------------
 if COOKIES_OK:

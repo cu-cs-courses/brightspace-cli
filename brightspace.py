@@ -1729,6 +1729,25 @@ DROPBOX_TOOL = 2000
 # its counters. Neither a create nor an update sends them.
 FOLDER_FACTS = ("Id", "ActivityId", "TotalFiles", "UnreadFiles", "FlaggedFiles",
                 "TotalUsers", "TotalUsersWithSubmissions", "TotalUsersWithFeedback")
+# A folder's file-type restriction, which the API reads and cannot write.
+# Measured on a sandbox, 2026-10-03: AllowableFileType is ignored on a create,
+# whatever its value, and CustomAllowableFileTypes is taken and ignored as a
+# string or null but refused as any list -- "JSON Binding Error", for an empty
+# one too -- which is the very shape it is read in, [".arr"]. So cloning a
+# folder restricted to some file types failed outright. Neither is ever sent:
+# a new folder says the restriction did not come with it, and set-folder
+# leaves a restricted folder to the web page rather than risk lifting it.
+FOLDER_UNWRITABLE = ("AllowableFileType", "CustomAllowableFileTypes")
+
+
+def file_types(folder):
+    """What a folder lets students hand in, in words, or None for anything."""
+    custom = [t for t in folder.get("CustomAllowableFileTypes") or [] if t]
+    if custom:
+        return ", ".join(custom) + " files only"
+    if folder.get("AllowableFileType"):
+        return f"a restricted set of file types (setting {folder['AllowableFileType']})"
+    return None
 
 
 def rich_input(value):
@@ -2132,8 +2151,8 @@ def cmd_new_folder(args):
     payload = dict(template)
     # Read-only: the server's own id for the folder and its activity, and the
     # submission counters, which are facts about the template rather than
-    # settings to carry over.
-    for key in FOLDER_FACTS:
+    # settings to carry over; and its file types, which no write can carry.
+    for key in FOLDER_FACTS + FOLDER_UNWRITABLE:
         payload.pop(key, None)
 
     # The link goes in the instructions, in the shape the API accepts. Sent in the
@@ -2178,6 +2197,9 @@ def cmd_new_folder(args):
     print(json.dumps(payload, indent=1))
     print(f"\n  modelled on {template.get('Name')!r}")
     print(f"  hidden from students: {yes_no(payload['IsHidden'])}")
+    if file_types(template):
+        print(f"  file types: {template.get('Name')!r} takes {file_types(template)}, which the "
+              "API cannot set, so this folder takes any file -- restrict it in the web page")
     if not payload["GradeItemId"]:
         print("  no grade item: --grade-item attaches one, or new-item --folder afterwards")
     if args.dry_run:
@@ -2219,10 +2241,14 @@ def cmd_set_folder(args):
     if f.get("LinkAttachments") or f.get("Attachments"):
         raise Failed(f"{f['Name']!r} carries an attachment the API cannot send back, so it is not "
                      "rewritten here; show or hide it in the web page")
+    if file_types(f):
+        raise Failed(f"{f['Name']!r} takes {file_types(f)}, which the API cannot send back, so it "
+                     "is not rewritten here; show or hide it in the web page")
     hidden = bool(args.hide)
     if bool(f.get("IsHidden")) == hidden:
         raise Failed(f"{f['Name']!r} is already {'hidden' if hidden else 'shown'}: nothing to change")
-    payload = {k: v for k, v in f.items() if k not in FOLDER_FACTS + ("Attachments", "LinkAttachments")}
+    payload = {k: v for k, v in f.items()
+               if k not in FOLDER_FACTS + FOLDER_UNWRITABLE + ("Attachments", "LinkAttachments")}
     payload["CustomInstructions"] = rich_input(f.get("CustomInstructions"))
     payload["IsHidden"] = hidden
     print(json.dumps(payload, indent=1))

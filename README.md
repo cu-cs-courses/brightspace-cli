@@ -460,6 +460,17 @@ in the UI. *Link attachments* on a folder are read-only: the documentation lists
 them in the folder it returns and nowhere in the data it accepts, and one sent
 anyway is dropped.
 
+*A folder's allowed file types* are read-only too, and worse: read back, a
+folder restricted to `.arr` says `AllowableFileType: 5` and
+`CustomAllowableFileTypes: [".arr"]`, and a create or an update that sends the
+list back is refused outright, `400 JSON Binding Error`, as is an empty list. A
+string or `null` there is taken and ignored, and so is `AllowableFileType`,
+whatever its value: measured on a sandbox, 2026-10-03, every probe came back
+unrestricted. So `new-folder` copies everything from its template but the file
+types, and says when the template had some; `set-folder` refuses a folder that
+has them, as it refuses one with an attachment, rather than risk lifting the
+restriction. Either is a click in the web page.
+
 *Announcements* cannot be posted on Commonwealth's instance. Creating one is
 refused with 400 *Invalid Parameters* in every shape the documentation allows:
 JSON and multipart/mixed, the body as `RichTextInput` and as `RichText`, every
