@@ -879,15 +879,19 @@ def find_folder(s, ou, want):
     raise Failed(f"{'no' if not hits else 'several'} entries match {want!r}: {names}")
 
 
-def submissions(s, ou, fid):
+def submissions(s, ou, fid, active_only=True):
+    """A folder's submissions by entity. `active_only` leaves out anyone not an
+    active learner — an instructor's own submission made while viewing the
+    course as a learner, among them; pass False to see those too."""
     le, _ = s.versions()
-    return s.api(f"/d2l/api/le/{le}/{ou}/dropbox/folders/{fid}/submissions/", {"activeOnly": "true"})
+    return s.api(f"/d2l/api/le/{le}/{ou}/dropbox/folders/{fid}/submissions/",
+                 {"activeOnly": "true"} if active_only else None)
 
 
-def entries(s, ou, fid):
+def entries(s, ou, fid, active_only=True):
     """Every submission in a folder, flat: (when, name, user id, submission)."""
     out = []
-    for e in submissions(s, ou, fid):
+    for e in submissions(s, ou, fid, active_only):
         ent = e.get("Entity") or {}
         for sub in e.get("Submissions") or []:
             out.append((local_dt(sub.get("SubmissionDate")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
