@@ -352,6 +352,7 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py setup 120 a6 [--go|--check]
     ./brightspace.py set-folder 240 'Assignment 5' --show
     ./brightspace.py delete-quiz 230 Untitled --go
+    ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like 'Quiz 2' [--go] [--clear]
 
 Each prints the exact body it is about to send, `--dry-run` stops before
 sending, and after sending **each reads its object back** and prints `checked
@@ -425,6 +426,29 @@ Attempts are student work, questions are authoring no route can put back, and a
 visible or graded quiz is in use, so any of those is refused with every reason
 listed. What is left is the blank a stray click on *New Quiz* leaves behind.
 Without `--go` it only says whether the quiz may go.
+
+**`copy-quiz` puts one quiz into several sections,** for a course taught as
+one Brightspace course per section. The API copies a whole tool, never one
+item: asked for quizzes, it copies every quiz in the course it copies from. So
+the quiz is made in a *shell* — a course of your own with no students, such
+as a sandbox, given a label in the courses file like any course — which holds
+that quiz and nothing else, and it is copied from there into every section,
+the first one included:
+
+    ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like 'Quiz 2'
+    ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like 'Quiz 2' --go --clear
+
+Bare, it checks everything and prints the plan. A copy keeps the quiz's
+questions, its dates and whether it is shown, and drops its link to a grade
+item without making one. So each section's copy is attached to that section's
+grade item of the quiz's own name, or, where there is none, to a new one
+shaped like `--item-like`'s; without either it has none. It stops before
+copying anything if the shell has students or holds any number of quizzes but
+one, or if a section already has a quiz of that name, and it deletes nothing:
+with `--clear`, the shell's quiz goes once every section has its copy, which
+leaves the shell ready for the next. Dates are copied as they are, so sections
+that meet on different days set their own in the web page. Measured on three
+sandboxes on 2026-10-04: a few seconds a section, and attempts never copied.
 
 **A quiz copied from one that shows in the calendar needs a date.** `new-quiz`
 carries the template's *Display in calendar* over, and Brightspace refuses such

@@ -76,7 +76,17 @@ NEWS = [{"Id": 900, "Title": "Class 9, Closing Journal", "StartDate": "2026-09-2
 # A quiz's four rich-text fields in the read shape, as the live Quiz 2 returns them.
 RICH = {k: {"Text": {"Text": "", "Html": ""}, "IsDisplayed": k != "Instructions"}
         for k in ("Instructions", "Description", "Header", "Footer")}
-NEXT = {"folder": 88, "item": 777}
+NEXT = {"folder": 88, "item": 777, "quiz": 5100}
+# A shell course for copy-quiz: no students and one quiz, which a copy job puts
+# into OU with its questions and without its grade item, as the live one does.
+SHELL = 1000500
+SHELLS = {"quizzes": [{"QuizId": 5001, "Name": "Quiz 9", "IsActive": False, "DueDate": None,
+                       "StartDate": None, "EndDate": "2026-10-09T03:59:00.000Z", **RICH, "Shuffle": True,
+                       "IsAutoSetGraded": True, "GradeItemId": 4321,
+                       "AttemptsAllowed": {"IsUnlimited": False, "NumberOfAttemptsAllowed": 2}}],
+          "people": [{"DisplayName": "Ada L", "ClasslistRoleDisplayName": "Instructor"}], "questions": 3}
+JOBS, COPIED = {}, {}                       # copy jobs by token; questions of each copied quiz
+COPYING = {"slow": False, "fail": False}    # a job that reads PROCESSING once; one that ends FAILED
 
 def stored_rich(v):
     """What D2L keeps of rich text sent to it: {"Content", "Type"} comes back as
@@ -143,6 +153,28 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, [{"ProductCode": "le", "LatestVersion": "1.99"}, {"ProductCode": "lp", "LatestVersion": "1.63"}])
         if not p.startswith("/d2l/api/"): return self.send(404, "nope", "text/plain")
         if not self.api_ok(): return self.send(403, '{ Errors: [ {Message: "Forbidden"} ] }', "text/html")
+        m = re.fullmatch(r"/d2l/api/le/1\.99/import/(\d+)/copy/(\w+)", p)
+        if m:
+            job = JOBS.get(m.group(2))
+            if not job: return self.send(404, {"Errors": [{"Message": "Resource Not Found"}]})
+            job["reads"] += 1
+            if job["slow"] and job["reads"] == 1: return self.send(200, {"Status": "PROCESSING"})
+            if not job["done"]:
+                job["done"] = True
+                for qz in ([] if job["status"] == "FAILED" else SHELLS["quizzes"]):
+                    NEXT["quiz"] += 1
+                    QUIZZES_MADE.append(dict(qz, QuizId=NEXT["quiz"], GradeItemId=None))
+                    COPIED[NEXT["quiz"]] = SHELLS["questions"]
+            return self.send(200, {"Status": job["status"]})
+        sb = f"/d2l/api/le/1.99/{SHELL}/"
+        if p.startswith(sb):
+            r = p[len(sb):]
+            if r == "quizzes/": return self.send(200, {"Objects": SHELLS["quizzes"], "Next": None})
+            if r == "classlist/": return self.send(200, SHELLS["people"])
+            if re.fullmatch(r"quizzes/\d+/questions/", r):
+                return self.send(200, {"Objects": [{"QuestionTypeId": 8}] * SHELLS["questions"], "Next": None})
+            if re.fullmatch(r"quizzes/\d+/attempts/", r): return self.send(200, {"Objects": [], "Next": None})
+            return self.send(404, {"Errors": [{"Message": "unknown " + r}]})
         if p == "/d2l/api/lp/1.63/users/whoami":
             return self.send(200, {"Identifier": "77", "FirstName": "Ada", "LastName": "Lovelace", "UniqueName": "alovelace"})
         if p == "/d2l/api/lp/1.63/enrollments/myenrollments/":
@@ -177,7 +209,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"Objects": [
                 {"QuestionTypeId": 8, "QuestionText": {"Text": "Upload your four programs here."}}], "Next": None})
         if re.fullmatch(r"quizzes/\d+/questions/", r):
-            return self.send(200, {"Objects": [], "Next": None})
+            made = COPIED.get(int(re.search(r"\d+", r).group()), 0)
+            return self.send(200, {"Objects": [{"QuestionTypeId": 8}] * made, "Next": None})
         if r == "quizzes/1/attempts/": return self.send(200, {"Objects": ATTEMPTS, "Next": None})
         if r == "quizzes/2/attempts/": return self.send(200, {"Objects": [], "Next": None})
         if r == "grades/categories/":
@@ -204,6 +237,10 @@ class H(BaseHTTPRequestHandler):
         base = f"/d2l/api/le/1.99/{OU}/"
         if not self.headers.get("X-Csrf-Token"):
             return self.send(403, "CSRF token required", "text/plain")
+        sb = f"/d2l/api/le/1.99/{SHELL}/quizzes/"
+        if self.path.startswith(sb):
+            SHELLS["quizzes"] = [x for x in SHELLS["quizzes"] if str(x["QuizId"]) != self.path[len(sb):]]
+            return self.send(200, "", "text/plain")
         m = re.fullmatch(r"quizzes/(\d+)", self.path[len(base):]) if self.path.startswith(base) else None
         if not m or int(m.group(1)) in DELETED:
             return self.send(404, {"Errors": [{"Message": "no such quiz"}]})
@@ -261,6 +298,17 @@ class H(BaseHTTPRequestHandler):
         # The body can only be read once, so read it here and let each branch parse it.
         n = int(self.headers.get("Content-Length", 0)); raw = self.rfile.read(n)
         form = urllib.parse.parse_qs(raw.decode())
+        m = re.fullmatch(r"/d2l/api/le/1\.99/import/(\d+)/copy/", self.path)
+        if m:
+            if self.headers.get("X-Csrf-Token") != TOKEN["now"]:
+                return self.send(403, "CSRF token required", "text/plain")
+            body = json.loads(raw)
+            if int(m.group(1)) != OU or body != {"SourceOrgUnitId": SHELL, "Components": ["Quizzes"]}:
+                return self.send(400, {"Errors": [{"Message": "not the copy this suite expects: " + json.dumps(body)}]})
+            token = str(672000 + len(JOBS))
+            JOBS[token] = {"reads": 0, "done": False, "slow": COPYING["slow"],
+                           "status": "FAILED" if COPYING["fail"] else "COMPLETE"}
+            return self.send(200, {"JobToken": token})
         if self.path == "/d2l/lp/auth/login/login.d2l":
             assert form.get("loginPath") == ["/d2l/login"], form
             if form.get("userName") == ["ada"] and form.get("password") == ["pw"]:
@@ -349,7 +397,7 @@ course_dir("login", "https://example.brightspace.com/d2l/login")
 COURSES = conf / "courses.ini"
 COURSES.write_text("# the suite's own\n\n[240]\nsite = site240\ndropbox = dropbox240\n\n"
                    f"[120]\nsite = site120\n\n[same]\nou = {OU}\n\n[login-only]\nsite = login\n\n"
-                   f"[withsite]\nsite = {out / 'site'}\nou = {OU}\n")
+                   f"[withsite]\nsite = {out / 'site'}\nou = {OU}\n\n[shell]\nou = {SHELL}\n")
 env = dict(os.environ, BRIGHTSPACE_STATE_DIR=str(state), BRIGHTSPACE_URL=f"http://127.0.0.1:{port}",
            BRIGHTSPACE_USER="ada", BRIGHTSPACE_COURSES=str(COURSES))
 fails = 0
@@ -442,7 +490,7 @@ run("courses", has=["1000240  240", "1000120  120", "Instructor"], lacks=["No " 
 # --- the courses file ---------------------------------------------------------
 # 240 resolving at all is the check on the section decoys in its _quarto.yml:
 # taken for the course, either would answer "no such org unit".
-run("folders", "nope", ok=False, has=["unknown course 'nope'", "240, 120, same, login-only, withsite"])
+run("folders", "nope", ok=False, has=["unknown course 'nope'", "240, 120, same, login-only, withsite, shell"])
 run("folders", "login-only", ok=False, has=["no urls.brightspace of the form", "[login-only]", "needs an ou"])
 run("folders", "same", has=["7001  My journal"])
 bad = conf / "bad.ini"
@@ -789,6 +837,47 @@ if COOKIES_OK:
         ok=False, has=["already has grade item 777"])
     run("new-quiz", "240", "Quiz 3", "--grade-item", "Assignment 7", "--dry-run",
         has=['"GradeItemId": 777', '"AutoExportToGrades": true', '"Content": ""'])
+
+    # copy-quiz: the one quiz in a shell course, into a section, whole.
+    run("copy-quiz", "shell", "--to", "240",
+        has=["'Quiz 9' in shell: 3 questions, hidden, end 2026-10-08 23:59",
+             "into 240: no grade item, since it has none called 'Quiz 9'", "nothing sent"])
+    run("copy-quiz", "shell", "--to", "240", "--item-like", "nope", ok=False, has=["240 has no grade item 'nope'"])
+    run("copy-quiz", "shell", "--to", "shell", ok=False, has=["shell is the shell itself"])
+    SHELLS["people"].append({"DisplayName": "Una S", "ClasslistRoleDisplayName": "Student"})
+    run("copy-quiz", "shell", "--to", "240", ok=False, has=["shell has 1 students, so it is a section"])
+    SHELLS["people"].pop()
+    SHELLS["quizzes"].append(dict(SHELLS["quizzes"][0], QuizId=5002, Name="Quiz 10"))
+    run("copy-quiz", "shell", "--to", "240", ok=False,
+        has=["shell holds 2 quizzes ('Quiz 9', 'Quiz 10')", "exactly the one to copy"])
+    SHELLS["quizzes"].pop()
+    COPYING["slow"] = True      # the job reads PROCESSING once, so the wait is exercised
+    run("copy-quiz", "shell", "--to", "240", "--item-like", "Assignment 1", "--go",
+        has=["into 240: attached to a new grade item 'Quiz 9', shaped like 'Assignment 1'",
+             "copied, quiz 5101 (job 672000)", "made grade item 'Quiz 9'", "shaped like 'Assignment 1'",
+             "checked on the server: name, questions, shown, dates, grade item",
+             "'Quiz 9' is in 240; the shell still holds it, and --clear empties it"])
+    COPYING["slow"] = False
+    fails += QUIZZES_MADE[-1]["GradeItemId"] != ITEMS[-1]["Id"] or ITEMS[-1]["Name"] != "Quiz 9"
+    print("   the copy sends its scores to the new item:", QUIZZES_MADE[-1]["GradeItemId"] == ITEMS[-1]["Id"])
+    run("copy-quiz", "shell", "--to", "240", "--go", ok=False,
+        has=["240 already has a quiz named 'Quiz 9'", "nothing has been copied anywhere"])
+    # An item already named like the quiz is the one it attaches to; --clear empties the shell.
+    run("new-item", "240", "Quiz 11", "--like", "Assignment 1")
+    SHELLS["quizzes"][0]["Name"] = "Quiz 11"
+    run("copy-quiz", "shell", "--to", "240", "--go", "--clear",
+        has=["into 240: attached to its grade item 'Quiz 11'", "checked on the server: gone from the shell",
+             "'Quiz 11' is in 240; the shell is empty again"], lacks=["made grade item"])
+    fails += SHELLS["quizzes"] != []; print("   the shell is empty:", SHELLS["quizzes"] == [])
+    run("copy-quiz", "shell", "--to", "240", ok=False, has=["shell holds 0 quizzes"])
+    # A job that fails leaves the section as it was and says so.
+    SHELLS["quizzes"].append({"QuizId": 5003, "Name": "Quiz 12", "IsActive": True, **RICH,
+                              "AttemptsAllowed": {"IsUnlimited": False, "NumberOfAttemptsAllowed": 1}})
+    COPYING["fail"] = True
+    run("copy-quiz", "shell", "--to", "240", "--go", "--clear", ok=False,
+        has=["ended FAILED, so nothing else was done here", "not done in 240; the shell keeps its quiz"])
+    COPYING["fail"] = False
+    fails += len(SHELLS["quizzes"]) != 1; print("   the shell keeps its quiz after a failure:", len(SHELLS["quizzes"]) == 1)
     # Announcements are read, not written: see brightspace.py for why.
     run("announcements", "240", has=["Class 9, Closing Journal", "2026-09-23 15:21", "Scratch", "draft"])
     run("new-folder", "240", "Assignment 5", ok=False, has=["already exists"])

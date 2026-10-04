@@ -84,6 +84,7 @@ import pathlib
 import re
 import struct
 import sys
+import time
 import threading
 import urllib.error
 import urllib.parse
@@ -1814,6 +1815,24 @@ def show_category(s, ou, cat_id, label):
           + ", ".join(f"{g['Name']!r} {(g.get('Weight') or 0):.3g}" for g in items))
 
 
+def clone_item_payload(full, name):
+    """A new grade item's body, shaped like the item full as the API returns it:
+    its category, points and scale, under a new name, attached to nothing.
+
+    In a category the category owns the weight: sending one is refused with
+    "Cannot set grade weight directly when weight is specified by grade
+    category" (live, 2026-09-27), and the category spreads its own over the new
+    item. Outside one, the weight is a share of the final grade and is never the
+    template's, so the total cannot drift: it starts at 0.
+    """
+    payload = {k: v for k, v in full.items() if k not in ("Id", "GradeSchemeUrl", "AssociatedTool", "Weight")}
+    payload |= {"Name": name, "ShortName": "", "AssociatedTool": None,
+                "Description": {"Content": "", "Type": "Text"}}
+    if not (payload.get("CategoryId") or 0):
+        payload["Weight"] = 0.0
+    return payload
+
+
 def cmd_new_item(args):
     """A grade item, shaped like a named one that already works in this course.
 
@@ -1835,19 +1854,11 @@ def cmd_new_item(args):
         raise Failed(f"a grade item called {args.name!r} already exists")
     ref = find_item(s, ou, args.like)
     full = s.api(f"/d2l/api/le/{le}/{ou}/grades/{ref['Id']}")
-    payload = {k: v for k, v in full.items() if k not in ("Id", "GradeSchemeUrl", "AssociatedTool")}
-    payload |= {"Name": args.name, "ShortName": "", "AssociatedTool": None,
-                "Description": {"Content": "", "Type": "Text"}}
+    payload = clone_item_payload(full, args.name)
     if args.points is not None:
         payload["MaxPoints"] = float(args.points)
     if args.category is not None:
         payload["CategoryId"] = find_category(s, ou, args.category)["Id"]
-    # In a category the category owns the weight: sending one is refused with
-    # "Cannot set grade weight directly when weight is specified by grade
-    # category" (live, 2026-09-27), and the category spreads its own over the new
-    # item. Outside one, the weight is a share of the final grade and is only
-    # ever what --weight says, never the template's, so the total cannot drift.
-    payload.pop("Weight", None)
     if args.weight is not None:
         payload["Weight"] = float(args.weight)
     elif not (payload.get("CategoryId") or 0):
@@ -2126,6 +2137,156 @@ def cmd_delete_quiz(args):
     left = [x["QuizId"] for x in s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/")]
     check_landed([("gone from the quiz list", False, qid in left)])
     print(f"deleted {q['Name']!r}")
+
+
+# --- one quiz into several sections -------------------------------------------
+#
+# The API copies a tool, never one item: a copy job asked for Quizzes copies
+# every quiz in its source. So a quiz meant for several sections is made in a
+# shell course that holds it and nothing else, and copied from there. Measured
+# on the sandboxes on 2026-10-04: a job takes a few seconds, and the copy keeps
+# the quiz's name, questions, dates and whether it is shown, and drops its link
+# to a grade item without making one. Attempts are not copied.
+
+COPY_POLL = 3      # seconds between reads of a copy job's status
+COPY_WAIT = 600    # how long to wait for one before saying so
+
+
+def copy_job(s, ou, source, components):
+    """Copy the named components of the course source into ou, and wait for the
+    job to finish: (its final status, its token)."""
+    le, _ = s.versions()
+    job = s.send("POST", f"/d2l/api/le/{le}/import/{ou}/copy/",
+                 {"SourceOrgUnitId": source, "Components": components})
+    token = job.get("JobToken")
+    if not token:
+        raise Failed(f"the copy into {ou} was not queued: {job!r}")
+    start = time.time()
+    while True:
+        status = s.api(f"/d2l/api/le/{le}/import/{ou}/copy/{token}").get("Status")
+        if status not in ("PENDING", "PROCESSING"):
+            return status, token
+        if time.time() - start > COPY_WAIT:
+            raise Failed(f"copy job {token} into {ou} is still {status} after {COPY_WAIT}s. It may "
+                         "finish on its own, so look in the course before running this again.")
+        time.sleep(COPY_POLL)
+
+
+def students_in(s, ou):
+    le, _ = s.versions()
+    return [u for u in s.api(f"/d2l/api/le/{le}/{ou}/classlist/")
+            if re.search(r"student|learner", u.get("ClasslistRoleDisplayName") or "", re.I)]
+
+
+def same_name(a, b):
+    return a.strip().lower() == b.strip().lower()
+
+
+def cmd_copy_quiz(args):
+    """Copy the one quiz in a shell course into each of several sections.
+
+    The API copies a whole tool, so asked for quizzes it copies every quiz in
+    the course it copies from. That course is therefore a shell: no students,
+    and exactly one quiz, the one to copy, made there with its questions and
+    settings. Each section receives exactly that quiz, with its questions, its
+    dates and whether it is shown -- the same in every section, the first one
+    included.
+
+    The copy drops the quiz's link to a grade item. So each section's copy is
+    attached to that section's item of the quiz's own name, or, where there is
+    none and --item-like names one, to a new item shaped like that one.
+
+    Without --go it checks everything and prints the plan, and sends nothing.
+    It stops before copying anything if the shell has students or holds any
+    number of quizzes but one, or if a section already has a quiz of that name.
+    Nothing is deleted anywhere, unless --clear asks for the shell's quiz to go
+    once every section has its copy, which leaves the shell ready for the next.
+    """
+    shell = course_site(args.shell)
+    s = open_session(args, shell.host)
+    le, _ = s.versions()
+    people = students_in(s, shell.ou)
+    if people:
+        raise Failed(f"{args.shell} has {len(people)} students, so it is a section and not a shell: "
+                     "a copy is made from a course with no students")
+    held = list(s.objects(f"/d2l/api/le/{le}/{shell.ou}/quizzes/"))
+    if len(held) != 1:
+        raise Failed(f"{args.shell} holds {len(held)} quizzes"
+                     + (f" ({', '.join(repr(x['Name']) for x in held)})" if held else "")
+                     + ". A copy takes every quiz in it, so it must hold exactly the one to copy.")
+    q = held[0]
+    name, questions = q["Name"], len(quiz_questions(s, shell.ou, q["QuizId"]))
+    dates = (q.get("StartDate"), q.get("EndDate"), q.get("DueDate"))
+    print(f"{name!r} in {args.shell}: {questions} questions, "
+          f"{'shown' if q.get('IsActive') else 'hidden'}, "
+          + ("start " + local(dates[0]) + ", " if dates[0] else "")
+          + ("end " + local(dates[1]) if dates[1] else "no end date"))
+    plan = []
+    for label in args.to:
+        dest = course_site(label)
+        if dest.ou == shell.ou:
+            raise Failed(f"{label} is the shell itself")
+        have = list(s.objects(f"/d2l/api/le/{le}/{dest.ou}/quizzes/"))
+        if any(same_name(x["Name"], name) for x in have):
+            raise Failed(f"{label} already has a quiz named {name!r}, and a copy would sit beside it; "
+                         "nothing has been copied anywhere")
+        items = grade_items(s, dest.ou)
+        item = next((g for g in items if same_name(g["Name"], name)), None)
+        like = None
+        if not item and args.item_like:
+            like = next((g for g in items if same_name(g["Name"], args.item_like)), None)
+            if not like:
+                raise Failed(f"{label} has no grade item {args.item_like!r} to shape {name!r}'s on")
+        plan.append((label, dest, {x["QuizId"] for x in have}, item, like))
+        print(f"  into {label}: " + (f"attached to its grade item {item['Name']!r}" if item else
+                                     f"attached to a new grade item {name!r}, shaped like {like['Name']!r}" if like else
+                                     f"no grade item, since it has none called {name!r}; --item-like makes one"))
+    if not args.go:
+        print("\n  nothing sent; --go copies it")
+        return
+    failed = []
+    for label, dest, before, item, like in plan:
+        print(f"\n{label}:")
+        try:
+            status, token = copy_job(s, dest.ou, shell.ou, ["Quizzes"])
+            if status != "COMPLETE":
+                raise Failed(f"copy job {token} ended {status}, so nothing else was done here")
+            new = [x for x in s.objects(f"/d2l/api/le/{le}/{dest.ou}/quizzes/") if x["QuizId"] not in before]
+            if len(new) != 1 or not same_name(new[0]["Name"], name):
+                raise Failed(f"copy job {token} finished, and what arrived is not one {name!r}: "
+                             + (", ".join(f"{x['QuizId']} {x['Name']!r}" for x in new) or "nothing")
+                             + ". It is left as it is.")
+            qid = new[0]["QuizId"]
+            print(f"  copied, quiz {qid} (job {token})")
+            if like:
+                full = s.api(f"/d2l/api/le/{le}/{dest.ou}/grades/{like['Id']}")
+                made = s.send("POST", f"/d2l/api/le/{le}/{dest.ou}/grades/", clone_item_payload(full, name))
+                item = s.api(f"/d2l/api/le/{le}/{dest.ou}/grades/{made['Id']}")
+                print(f"  made grade item {item['Name']!r}, id {item['Id']}, shaped like {like['Name']!r}")
+            if item:
+                payload = quiz_update_payload(quiz_detail(s, dest.ou, str(qid)))
+                payload |= {"GradeItemId": item["Id"], "AutoExportToGrades": True}
+                s.send("PUT", f"/d2l/api/le/{le}/{dest.ou}/quizzes/{qid}", payload)
+            back = quiz_detail(s, dest.ou, str(qid))
+            check_landed([("name", name, back.get("Name")),
+                          ("questions", questions, len(quiz_questions(s, dest.ou, qid))),
+                          ("shown", q.get("IsActive"), back.get("IsActive")),
+                          ("dates", dates, (back.get("StartDate"), back.get("EndDate"), back.get("DueDate")))]
+                         + ([("grade item", item["Id"], back.get("GradeItemId"))] if item else []), "copied")
+        except Failed as e:
+            failed.append(label)
+            print(f"  {e}")
+    if failed:
+        raise Failed(f"not done in {', '.join(failed)}"
+                     + ("; the shell keeps its quiz" if args.clear else ""))
+    if args.clear:
+        if list(s.objects(f"/d2l/api/le/{le}/{shell.ou}/quizzes/{q['QuizId']}/attempts/")):
+            raise Failed(f"{name!r} has attempts in the shell, so it stays there")
+        s.send("DELETE", f"/d2l/api/le/{le}/{shell.ou}/quizzes/{q['QuizId']}", None)
+        left = [x["QuizId"] for x in s.objects(f"/d2l/api/le/{le}/{shell.ou}/quizzes/")]
+        check_landed([("gone from the shell", False, q["QuizId"] in left)], "cleared")
+    print(f"\n{name!r} is in {', '.join(label for label, *_ in plan)}"
+          + ("; the shell is empty again" if args.clear else "; the shell still holds it, and --clear empties it"))
 
 
 def cmd_new_folder(args):
@@ -2623,6 +2784,17 @@ def main(argv=None):
     x.add_argument("--site", help="the course website repo to read (default: its site in the courses file)")
     x = with_course("announcements", cmd_announcements, help="the latest announcements, when each appears")
     x.add_argument("--last", type=int, default=10, help="how many (default 10)")
+
+    x = sub.add_parser("copy-quiz", help="copy the one quiz in a shell course into each of several sections",
+                       description=cmd_copy_quiz.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    x.add_argument("shell", help="the course the quiz was made in, with no students and no other quiz")
+    x.add_argument("--to", nargs="+", required=True, metavar="COURSE", help="the sections to copy it into")
+    x.add_argument("--item-like", dest="item_like", metavar="ITEM",
+                   help="where a section has no grade item named like the quiz, make one shaped like this one")
+    x.add_argument("--go", action="store_true", help="copy; without it, check and print the plan")
+    x.add_argument("--clear", action="store_true",
+                   help="once every section has its copy, delete the quiz from the shell")
+    x.set_defaults(fn=cmd_copy_quiz)
 
     x = with_course("delete-quiz", cmd_delete_quiz,
                     help="delete a quiz with no attempts, no questions and no grade item")
