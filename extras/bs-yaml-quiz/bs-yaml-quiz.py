@@ -343,6 +343,18 @@ def weighted(item, where, what):
     raise Failed(f"{where}: each of its {what} is `- <weight>: <text>`, not {item!r}")
 
 
+def spliced(value):
+    """A list with any list inside it spliced in, so that an anchored list can
+    be one item among others: `- *compile-error` and then a spelling of its own.
+    Anything that is not a list is left for the caller to refuse."""
+    if not isinstance(value, list):
+        return value
+    out = []
+    for x in value:
+        out += spliced(x) if isinstance(x, list) else [x]
+    return out
+
+
 def plain(value, where, what):
     """Text for a cell that D2L shows as it is: one line, no Markdown."""
     if not isinstance(value, str):
@@ -391,7 +403,7 @@ def question_rows(q, where):
         if q.get("width", WIDTH) not in NONE:
             rows.append(["InputBox", number(q.get("rows", ROWS), where, "rows"),
                          number(q.get("width", WIDTH), where, "width")])
-        answers = q.get("answers")
+        answers = spliced(q.get("answers"))
         if not isinstance(answers, list) or not answers:
             raise Failed(f"{where}: a short answer needs answers, every spelling that counts")
         for a in answers:
@@ -401,7 +413,7 @@ def question_rows(q, where):
             regexp = truth(rest["regexp"], where, "regexp") if "regexp" in rest else False
             rows.append(["Answer", weight, plain(text, where, "an answer"), "regexp" if regexp else ""])
     if kind in ("MC", "MS"):
-        options = q.get("options")
+        options = spliced(q.get("options"))
         if not isinstance(options, list) or not options:
             raise Failed(f"{where}: a {kind} question needs its options")
         for o in options:
@@ -418,13 +430,13 @@ def question_rows(q, where):
         rows.append(["TRUE", number(weights[0], where, "a weight"), plain(q.get("true_feedback", ""), where, "feedback")])
         rows.append(["FALSE", number(weights[1], where, "a weight"), plain(q.get("false_feedback", ""), where, "feedback")])
     if kind == "M":
-        for i, c in enumerate(q.get("choices") or [], 1):
+        for i, c in enumerate(spliced(q.get("choices") or []), 1):
             rows.append(["Choice", str(i), plain(c, where, "a choice")])
-        for m in q.get("matches") or []:
+        for m in spliced(q.get("matches") or []):
             n, text, _ = weighted(m, where, "matches")
             rows.append(["Match", n, plain(text, where, "a match")])
     if kind == "O":
-        for item in q.get("items") or []:
+        for item in spliced(q.get("items") or []):
             item = {"text": item} if isinstance(item, str) else item
             if not isinstance(item, dict) or "text" not in item or set(item) - {"text", "format", "feedback"}:
                 raise Failed(f"{where}: an item is its text, or text: with format: and feedback:")

@@ -71,6 +71,13 @@ question is:
 | `initial_text`, `answer_key` | `WR`: what the box starts with, and the grader's key. |
 | `id`, `difficulty`, `image`, `hint`, `feedback` | D2L's own rows of those names. |
 
+**A list repeated between questions is written once,** with a YAML anchor:
+`answers: &compile-error` and the list on the first question that has it, and
+`answers: *compile-error` on the next. An anchored list can also be one item
+of another, `- *compile-error`, and its items are spliced in where it stands,
+so a question can take the shared spellings and add its own. The same goes for
+options, choices, matches and items. Anchors do not reach across files.
+
 **Every value is read as the text written.** An answer of `010`, `0.10`, `yes`
 or `true` is exactly that, and never a number or a boolean: the file is read
 with PyYAML's `BaseLoader`. Quote a value only where YAML itself needs it, as

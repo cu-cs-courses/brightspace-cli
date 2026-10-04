@@ -152,6 +152,23 @@ check("010, 0.10, yes, true, null and ~ stay as written, and points as 25",
       [x[2] for x in rows("text.csv") if x[0] == "Answer"] == ["010", "0.10", "yes", "true", "null", "~"]
       and ["Points", "25", "", "", ""] in rows("text.csv"), rows("text.csv"))
 
+# --- anchors: a list written once ------------------------------------------------------
+yml("anchors.yml", "questions:\n"
+    "- type: SA\n  text: First.\n  answers: &ce\n  - COMPILE ERROR\n  - COMPILE-ERROR\n"
+    "- type: SA\n  text: Second.\n  answers: *ce\n"
+    "- type: SA\n  text: Third.\n  answers:\n  - *ce\n  - it does not compile\n"
+    "- type: MC\n  text: Fourth.\n  options:\n  - 100: right\n  - &wrong\n    - 0: wrong one\n    - 0: wrong two\n"
+    "- type: MC\n  text: Fifth.\n  options:\n  - *wrong\n  - 100: right again\n")
+run("anchors.yml")
+got = [(x[0], x[1], x[2]) for x in rows("anchors.csv") if x and x[0] in ("Answer", "Option")]
+check("an anchored list, whole or as one item among others, is spliced in where it stands",
+      got == [("Answer", "100", "COMPILE ERROR"), ("Answer", "100", "COMPILE-ERROR"),
+              ("Answer", "100", "COMPILE ERROR"), ("Answer", "100", "COMPILE-ERROR"),
+              ("Answer", "100", "COMPILE ERROR"), ("Answer", "100", "COMPILE-ERROR"),
+              ("Answer", "100", "it does not compile"),
+              ("Option", "100", "right"), ("Option", "0", "wrong one"), ("Option", "0", "wrong two"),
+              ("Option", "0", "wrong one"), ("Option", "0", "wrong two"), ("Option", "100", "right again")], got)
+
 # --- the Markdown it reads -------------------------------------------------------------
 md = lambda s: bq.md_html(s, "test")
 check("a backslash makes punctuation literal", md(r"\*not emphasis\* and \`no code\`") ==
