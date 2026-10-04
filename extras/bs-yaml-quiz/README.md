@@ -162,6 +162,12 @@ tool handles and one of which it cannot:
   lines together.
 - **Options cannot carry HTML.** The option's text sits where the marker would
   have to go.
+- **A short answer has one box.** Brightspace's own questions can have several
+  blanks, each with answers of its own, but the CSV cannot say which blank an
+  answer belongs to: two `InputBox` rows import as a single box that takes
+  every answer listed, and an `MSA` question is not imported at all. Measured
+  on a sandbox, 2026-10-04. A question that wants two values is two questions
+  over the same program.
 - **Do not open the CSV in Excel and save it.** Its "CSV UTF-8" adds a BOM and
   mangles the HTML.
 - **Importing puts questions in the Question Library only.** The quiz itself
