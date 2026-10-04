@@ -89,6 +89,11 @@ check("true or false: TRUE earns 100 and FALSE nothing",
 check("multi-select: its scoring rule, and options weighted 1 and 0",
       ["Scoring", "RightAnswers", "", "", ""] in r and ["Option", "0", 'int y = "3";', "", ""] in r)
 
+# The brightspace: block is setup-quiz's: the CSV is what the questions make, with or without it.
+yml("bare.yml", "questions:\n" + (HERE / "example.yml").read_text().split("\nquestions:\n", 1)[1])
+run("bare.yml", has=["wrote bare.csv: 5 questions"])
+check("the block changes nothing in the CSV", (tmp / "bare.csv").read_bytes() == raw)
+
 # --- --check ----------------------------------------------------------------------
 run("example.yml", "--check", lacks=["missing", "not what"])
 (tmp / "example.csv").write_bytes(raw.replace(b"six", b"seven"))
@@ -203,6 +208,12 @@ refuses("both.yml", "questions:\n- type: SA\n  text: Hi.\n  html: <p>Hi.</p>\n  
 refuses("fence.yml", "questions:\n- type: SA\n  text: |\n    ```\n    never closed\n  answers: [x]\n", "never closed")
 refuses("lines.yml", "questions:\n- type: SA\n  text: Hi.\n  answers:\n  - |\n    two\n    lines\n", "is one line")
 refuses("top.yml", "- type: SA\n", "a quiz file is `questions:`")
+refuses("other.yml", "quiz:\n  name: Quiz 4\nquestions:\n- type: SA\n  text: Hi.\n  answers: [x]\n",
+        "a quiz file is `questions:`")
+refuses("list.yml", "brightspace:\n- Quiz 4\nquestions:\n- type: SA\n  text: Hi.\n  answers: [x]\n",
+        "`brightspace:` is a block of `key: value` lines")
+refuses("nested.yml", "brightspace:\n  name:\n    first: Quiz\nquestions:\n- type: SA\n  text: Hi.\n  answers: [x]\n",
+        "each value text")
 write_csv("unknown.csv", [["NewQuestion", "SA"], ["QuestionText", "<p>Hi.</p>", "HTML"], ["Bogus", "1"], []])
 run("unknown.csv", ok=False, has=["a 'Bogus' row is not one this tool knows"])
 

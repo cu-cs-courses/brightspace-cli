@@ -6,12 +6,12 @@ grade items, the classlist. A few commands write — a folder, a quiz, a grade
 item — and each one prints what it is about to send and reads the result back.
 
 It is one file, standard library only, plus `lz4` to read a session out of
-Firefox. Written for Commonwealth University's Brightspace, whose CU accounts
-log in through single sign-on; `--base-url` or `$BRIGHTSPACE_URL` names any
-other host.
+Firefox and PyYAML for `setup-quiz`, which reads a quiz's YAML. Written for
+Commonwealth University's Brightspace, whose CU accounts log in through single
+sign-on; `--base-url` or `$BRIGHTSPACE_URL` names any other host.
 
     git clone https://github.com/cu-cs-courses/brightspace-cli ~/brightspace-cli
-    pip install --user lz4         # or on Nix: python3.withPackages (ps: [ ps.lz4 ])
+    pip install --user lz4 pyyaml  # or on Nix: python3.withPackages (ps: [ ps.lz4 ps.pyyaml ])
     cd ~/brightspace-cli
     ./brightspace.py session       # logged in to Brightspace in Firefox first
     ./brightspace.py init --sites ~/courses
@@ -351,6 +351,7 @@ can be checked the morning of the exam in one command rather than five tabs.
         --link https://example.edu/cmsc-120/assignments/a5-arrays.html
     ./brightspace.py new-item 120 'Assignment 5' --like 'Assignment 4' --folder 'Assignment 5'
     ./brightspace.py setup 120 a6 [--go|--check]
+    ./brightspace.py setup-quiz quizzes/q5-pointers/q5-pointers.yml [--go|--check]
     ./brightspace.py set-folder 240 'Assignment 5' --show
     ./brightspace.py delete-quiz 230 Untitled --go
     ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like 'Quiz 2' [--go] [--clear]
@@ -379,6 +380,27 @@ The settings come from the assignment before; `--like` names another, and A1
 always needs it. Bare prints the plan, `--go` creates, and `--check` sets
 Brightspace beside the files and exits 1 on any difference, so a deadline
 moved in `assignments.yml` and not on Brightspace gets noticed.
+
+**`setup-quiz` makes a quiz from its own file.** A quiz written for
+[bs-yaml-quiz](extras/bs-yaml-quiz/README.md#where-it-goes-on-brightspace) can
+carry a `brightspace:` block beside its questions: the course, the quiz's
+name, the quiz to copy the settings from, the dates, the timer, the attempts
+and a description in Markdown. `setup-quiz` makes the quiz from it, and first
+its grade item: one of the quiz's own name, shaped like the one the copied
+quiz sends its scores to, unless the block says `grade_item: none`. Bare
+prints the plan, `--go` makes them, and `--check` sets Brightspace beside the
+file and exits 1 on any difference: the questions are counted, and the CSV
+beside the file is compared with what the file makes now. Every question is
+made into the CSV before anything is sent, so a quiz whose questions would not
+import is never made. bs-yaml-quiz reads the file for it, so the two never read
+one file two ways, and that makes it the one command that needs PyYAML.
+
+**Brightspace keeps a description in words, not in the HTML sent.** It
+rewrites the markup (`&mdash;` comes back as the dash itself, an apostrophe as
+`&#39;`) and keeps a plain text beside it with every tag taken out and nothing
+in its place, so two paragraphs come back run together. A description is read
+back by its words, the spacing between them left out. Measured on a sandbox,
+2026-10-04.
 
 **They copy a shape that already works** rather than building a payload out of
 the documentation. `new-category` clones an existing category, `new-quiz` an
@@ -507,10 +529,13 @@ denominator the Statistics page does not print.
 
 ## A web page
 
-`brightspace-web.py` puts `copy-quiz` on a page, for whoever would rather not
-type it; the rest of the commands can follow. Each button runs the command the
-page shows and prints what it printed, so the page checks and refuses exactly
-what the command does.
+`brightspace-web.py` puts `setup-quiz` and `copy-quiz` on a page, for whoever
+would rather not type them; the rest of the commands can follow. Each button
+runs the command the page shows and prints what it printed, so the page checks
+and refuses exactly what the command does. A quiz's file is chosen, or pasted
+into a box, and run in a directory of its own beside the CSV made from it, as
+bs-yaml-quiz would leave it; the page offers that CSV for download, for the
+Question Library's import.
 
     ./brightspace-web.py                      on your own machine, as you; it opens itself
     ./brightspace-web.py --access web.ini     behind Cloudflare Access, as whoever signed in
@@ -548,12 +573,17 @@ carries a token made when it starts.
 [`extras/bs-yaml-quiz/`](extras/bs-yaml-quiz/README.md) writes a quiz as YAML,
 with each question's text in Markdown, and turns it into the question-import
 CSV that puts it in a Question Library; and a CSV made another way back into
-YAML. `new-quiz` then makes the quiz the questions go into.
+YAML. `setup-quiz` then makes the quiz the questions go into, from the
+`brightspace:` block in the same file.
 
 ## Tests
 
     python3 test_brightspace.py
     MOCK_COOKIES_OK=0 python3 test_brightspace.py     # /d2l/api/ refuses cookies: the token fallback
+    python3 extras/bs-yaml-quiz/test_bs_yaml_quiz.py
+
+The `setup-quiz` cases need PyYAML, as the command does; without it they are
+skipped, and the run says so.
 
 They run the tool as a subprocess against a fake Brightspace, which is also
 where the API's JSON shapes are written down. **Everything in it is invented**

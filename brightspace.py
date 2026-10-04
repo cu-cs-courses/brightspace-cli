@@ -14,6 +14,8 @@
     ./brightspace.py new-item 120 'Assignment 5' --like 'Assignment 4' --folder 'Assignment 5'
     ./brightspace.py setup 120 a6 [--go|--check] an assignment's folder and grade item, every value
                                                  read off assignments.yml and config/brightspace.yml
+    ./brightspace.py setup-quiz q5.yml [--go|--check]  a quiz and its grade item, from the
+                                                 brightspace: block in the quiz's own YAML
     ./brightspace.py set-folder 240 'Assignment 5' --show
     ./brightspace.py set-quiz 120 'Quiz 3' --shuffle --auto-publish
     ./brightspace.py announcements 120
@@ -23,8 +25,9 @@
     ./brightspace.py logout
 
 Almost everything here reads. The commands that write are new-category,
-set-item, new-item, new-quiz, set-quiz, new-folder and set-folder, and setup
-through new-folder and new-item. They print what they are about to send,
+set-item, new-item, new-quiz, set-quiz, new-folder, set-folder, copy-quiz and
+delete-quiz, setup through new-folder and new-item, and setup-quiz through
+new-item and new-quiz. They print what they are about to send,
 --dry-run stops before sending, and each reads its object back afterwards and
 says what Brightspace kept. Nothing else changes anything.
 
@@ -74,10 +77,12 @@ like one made by hand. Files go under the course's `dropbox =` directory, or
 import argparse
 import collections
 import datetime as dt
+import functools
 import getpass
 import html
 import http.client
 import http.cookiejar
+import importlib.util
 import json
 import os
 import pathlib
@@ -1805,6 +1810,20 @@ def text_of(rich):
             or re.sub(r"<[^>]+>", "", rich.get("Html") or rich.get("Content") or ""))
 
 
+def words(text):
+    """What rich text says, as one line of words."""
+    return " ".join(strip_html(text or "").split())
+
+
+def text_pair(sent, kept):
+    """Rich text sent and the text kept, as words to show side by side, and the
+    same string when they say the same thing. D2L keeps a plain text of its own
+    beside the HTML, its tags taken out with nothing in their place, so two
+    paragraphs come back run together: the spacing is not compared."""
+    want, got = words(sent), words(kept)
+    return (want, want) if "".join(want.split()) == "".join(got.split()) else (want, got)
+
+
 def check_landed(checks, verb="created"):
     """Compare what was sent with what the server kept, and say which it was.
 
@@ -2027,6 +2046,16 @@ def cmd_new_quiz(args):
     Its questions cannot come this way: the API has no route that creates one, so
     the Written Response question that takes the files is added by hand afterwards.
     """
+    if make_quiz(args):
+        print("Left to do by hand, because no API route creates a question:")
+        print("  one Written Response question, 'Enable inserted images and attachments' ticked,")
+        print("  then make the quiz visible.")
+
+
+def make_quiz(args, description=None, item_hint="--grade-item attaches one"):
+    """new-quiz's work, for setup-quiz as well: the quiz made and read back, or
+    with --dry-run the payload printed. description is HTML for the quiz's own;
+    item_hint is what is said when it goes to no grade item. The quiz, or None."""
     s, ou, _ = course(args)
     le, _ = s.versions()
     quizzes = list(s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/"))
@@ -2078,6 +2107,9 @@ def cmd_new_quiz(args):
         if isinstance(payload.get(key), dict):
             payload[key] = {"Text": {"Content": "", "Type": "Text"},
                             "IsDisplayed": bool(payload[key].get("IsDisplayed"))}
+    # The quiz's own words, as HTML: setup-quiz's, from the Markdown in its file.
+    if description:
+        payload["Description"] = {"Text": {"Content": description, "Type": "Html"}, "IsDisplayed": True}
     if args.grade_item:
         # Linked from the quiz's side, the way Quiz 1 and 2 are, with scores sent
         # to it as they come in.
@@ -2085,12 +2117,13 @@ def cmd_new_quiz(args):
         payload["AutoExportToGrades"] = True
     shown = dict(payload)
     print(json.dumps(shown, indent=1))
-    print(f"\n  modelled on {template['Name']!r}, with its instructions and header emptied")
+    print(f"\n  modelled on {template['Name']!r}, with its instructions and header emptied"
+          + (" and its description written" if description else ""))
     if not payload["GradeItemId"]:
-        print("  no grade item: --grade-item attaches one")
+        print("  no grade item: " + item_hint)
     if args.dry_run:
         print("  --dry-run: nothing sent")
-        return
+        return None
     made = s.send("POST", f"/d2l/api/le/{le}/{ou}/quizzes/", payload)
     print(f"\ncreated quiz {made.get('Name')!r}, id {made.get('QuizId')}, "
           f"visible to students: {yes_no(made.get('IsActive'))}")
@@ -2104,10 +2137,10 @@ def cmd_new_quiz(args):
         ("time limit", limit_of(payload.get("SubmissionTimeLimit")), limit_of(back.get("SubmissionTimeLimit"))),
         ("IP range", ips(payload["RestrictIPAddressRange"]), ips(back.get("RestrictIPAddressRange"))),
         ("password", bool(args.password), bool(back.get("Password"))),
-        ("grade item", payload["GradeItemId"], back.get("GradeItemId"))])
-    print("Left to do by hand, because no API route creates a question:")
-    print("  one Written Response question, 'Enable inserted images and attachments' ticked,")
-    print("  then make the quiz visible.")
+        ("grade item", payload["GradeItemId"], back.get("GradeItemId"))]
+        + ([("description", *text_pair(description, text_of((back.get("Description") or {}).get("Text"))))]
+           if description else []))
+    return back
 
 
 def cmd_delete_quiz(args):
@@ -2652,6 +2685,234 @@ def cmd_setup(args):
     print("\n" + setup_remainder(plan, args.course))
 
 
+# --- a quiz, from its own YAML file ----------------------------------------------
+#
+# A quiz written for extras/bs-yaml-quiz can say where it goes: a `brightspace:`
+# block beside its questions, with the course, the quiz's name, the quiz to copy
+# the settings from, the dates, the timer, the attempts and the description.
+# `setup-quiz` makes the quiz and its grade item from there, so each of those is
+# written once, in the file that holds the questions, and the web page takes the
+# same file. Artem, 2026-10-04: "it's good to have all in one place". It replaces
+# a setup.sh per quiz, which typed them all as flags.
+#
+# The file is bs-yaml-quiz's, and bs-yaml-quiz reads it here too, so the two can
+# never read one file two ways: its questions are made into the CSV before
+# anything is sent, and its Markdown is the description's. That makes PyYAML a
+# need of this command alone; everything else here is the standard library.
+
+QUIZ_KEYS = ("course", "name", "like", "start", "end", "minutes", "attempts", "ip", "password",
+             "points", "grade_item", "description")
+
+
+@functools.cache
+def quiz_format():
+    """extras/bs-yaml-quiz, as a module: the quiz file's reader, CSV and Markdown."""
+    path = pathlib.Path(__file__).resolve().parent / "extras" / "bs-yaml-quiz" / "bs-yaml-quiz.py"
+    spec = importlib.util.spec_from_file_location("bs_yaml_quiz", path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except FileNotFoundError:
+        raise Failed(f"no {path}: a quiz file is read by the bs-yaml-quiz beside this tool")
+    except ImportError:
+        raise Failed("a quiz file is read with PyYAML, which this Python does not have: "
+                     "`pip install pyyaml`, or on Nix python3.withPackages (ps: [ ps.pyyaml ])")
+    return mod
+
+
+def quiz_plan(path):
+    """What setup-quiz makes from a quiz's file: its brightspace: block, checked,
+    with the questions counted and the CSV beside the file compared with them."""
+    fmt = quiz_format()
+    try:
+        data = fmt.load(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        raise Failed(f"{path}: {e.strerror or e}")
+    except fmt.yaml.YAMLError as e:
+        raise Failed(f"{path}: not YAML: {e}")
+    try:
+        csv_text = fmt.to_csv(data, str(path))
+    except fmt.Failed as e:
+        raise Failed(str(e))
+    block = data.get("brightspace")
+    if not block:
+        raise Failed(f"{path} has no brightspace: block to say which course the quiz goes in and when it runs; "
+                     "extras/bs-yaml-quiz/README.md has its keys")
+    unknown = [k for k in block if k not in QUIZ_KEYS]
+    if unknown:
+        raise Failed(f"{path}: brightspace: has {', '.join(unknown)}, which setup-quiz does not know; "
+                     f"it reads {', '.join(QUIZ_KEYS)}")
+    at = f"{path}: brightspace:"
+    plan = {k: v.strip() for k, v in block.items() if v.strip() not in fmt.NONE}
+    # Written at all, grade_item says there is none, in whichever word for nothing.
+    if "grade_item" in block and block["grade_item"].strip().lower() not in (*fmt.NONE, "none", "false", "no"):
+        raise Failed(f"{path}: brightspace: grade_item: is none, or left out for an item of the quiz's own name")
+    plan["item"] = "grade_item" not in block
+    for key in ("course", "name"):
+        if key not in plan:
+            raise Failed(f"{at} has no {key}")
+    for key in ("start", "end"):
+        if key in plan:
+            try:
+                local_to_utc(plan[key])
+            except Failed as e:
+                raise Failed(f"{at} {key}: {e}")
+    for key in ("minutes", "attempts"):
+        if key in plan and not re.fullmatch(r"[1-9]\d*", plan[key]):
+            raise Failed(f"{at} {key}: is a whole number, not {plan[key]!r}")
+    if "points" in plan and not re.fullmatch(r"\d+(\.\d+)?", plan["points"]):
+        raise Failed(f"{at} points: is a number, not {plan['points']!r}")
+    if "ip" in plan and not re.fullmatch(r"[\d.]+\s*-\s*[\d.]+", plan["ip"]):
+        raise Failed(f"{at} ip: is a range like 148.137.150.0-148.137.150.255, not {plan['ip']!r}")
+    if "points" in plan and not plan["item"]:
+        raise Failed(f"{at} points: is what its grade item is out of, and grade_item: none makes none")
+    if "description" in plan:
+        try:
+            plan["description_html"] = fmt.md_html(block["description"], f"{at} description")
+        except fmt.Failed as e:
+            raise Failed(str(e))
+    csv_path = path.with_suffix(".csv")
+    have = csv_path.read_bytes().decode("utf-8") if csv_path.exists() else None
+    return plan | {"path": path, "csv": csv_path, "questions": len(data["questions"]),
+                   "worth": sum(float(q.get("points", fmt.POINTS)) for q in data["questions"]),
+                   "csv_state": None if have is None else "current" if have == csv_text else "stale"}
+
+
+def quiz_summary(plan):
+    """What a plan makes, in three lines a person reads before the payloads."""
+    when = (f"opens {plan.get('start', 'with no start date')}, closes {plan.get('end', 'with no end date')}; "
+            + (f"{plan['minutes']} minutes" if "minutes" in plan else "the time limit of the quiz it copies")
+            + f", {plan.get('attempts', '1')} attempt{'' if plan.get('attempts', '1') == '1' else 's'}")
+    copied = f"settings copied from {plan['like']!r}" if "like" in plan else "settings copied from the course's last quiz"
+    item = (f"scores to a grade item {plan['name']!r}" + (f", out of {plan['points']}" if "points" in plan else "")
+            if plan["item"] else "no grade item")
+    return (f"{plan['name']} in {plan['course']}: {plan['questions']} questions from {plan['path'].name}, "
+            f"worth {plan['worth']:g}\n  {when}\n  {copied}; {item}"
+            + ("; a description" if "description" in plan else "") + "\n")
+
+
+def quiz_remainder(plan, template, shown):
+    """What is left once setup-quiz has run, printed last so it is in front of you."""
+    yml, csv_name = shown, plan["csv"].name
+    made = {"current": "", None: f", which bs-yaml-quiz.py {yml} makes",
+            "stale": f" once bs-yaml-quiz.py {yml} has made it again: it is not what the file makes now"}
+    return "\n".join([
+        "Then by hand, since no API route does these:",
+        f" 1. Question Library -> Import -> Upload a File -> {csv_name}{made[plan['csv_state']]}.",
+        f" 2. {plan['name']} -> Add Existing -> the {plan['questions']} questions it imported.",
+        " 3. Submission views, if students are to see more after an attempt than the default:",
+        f"    none came from {template!r}, since no route reads or writes them.",
+        " 4. Make it visible to students, once it has its questions.",
+        f"Then setup-quiz {yml} --check reads it all back, the questions counted."])
+
+
+def check_quiz(s, ou, plan):
+    """Brightspace beside the quiz's file. True when nothing differs."""
+    rows = []
+    def row(what, want, got, same=None):
+        rows.append([what, want, got, "" if (want == got if same is None else same) else "DIFFERS"])
+    le, _ = s.versions()
+    hits = [q for q in s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/") if same_name(q["Name"], plan["name"])]
+    q = hits[0] if len(hits) == 1 else None
+    row("quiz", plan["name"], q["Name"] if q else f"{len(hits)} of that name" if hits else "(none)")
+    if q:
+        for what, key, field in (("opens", "start", "StartDate"), ("closes", "end", "EndDate")):
+            want = plan.get(key)
+            row(what, want or "(none)", local(q.get(field)) or "(none)",
+                (local_to_utc(want) if want else None) == q.get(field))
+        on, minutes = limit_of(q.get("SubmissionTimeLimit"))
+        row("time limit", f"{plan['minutes']} minutes" if "minutes" in plan else "-",
+            f"{minutes} minutes" if on else "(none)",
+            "minutes" not in plan or (on and str(minutes) == plan["minutes"]))
+        row("attempts", plan.get("attempts", "1"),
+            str((q.get("AttemptsAllowed") or {}).get("NumberOfAttemptsAllowed")))
+        ips = [f"{r.get('IPRangeStart')}-{r.get('IPRangeEnd')}" for r in q.get("RestrictIPAddressRange") or []]
+        row("IP range", re.sub(r"\s+", "", plan.get("ip", "")) or "(none)", ", ".join(ips) or "(none)")
+        row("password", plan.get("password", "(none)"), q.get("Password") or "(none)")
+        item = next((g for g in grade_items(s, ou) if g["Id"] == q.get("GradeItemId")), None)
+        row("grade item", plan["name"] if plan["item"] else "(none)", item["Name"] if item else "(none)",
+            (bool(item) and same_name(item["Name"], plan["name"])) if plan["item"] else not item)
+        if item:
+            row("out of", plan.get("points", "-"), f"{item.get('MaxPoints'):g}",
+                "points" not in plan or float(plan["points"]) == item.get("MaxPoints"))
+        row("questions", str(plan["questions"]), str(len(quiz_questions(s, ou, q["QuizId"]))))
+        if "description" in plan:
+            want, got = text_pair(plan["description_html"], text_of((q.get("Description") or {}).get("Text")))
+            cut = lambda t: t if len(t) <= 32 else t[:31] + "…"
+            row("description", cut(want), cut(got) or "(none)", want == got)
+        rows.append(["visible", "", yes_no(q.get("IsActive")), ""])
+    if plan["csv_state"]:
+        row(plan["csv"].name, "current", plan["csv_state"])
+    table(["", "the file says", "Brightspace has", ""], rows)
+    return not any(r[3] for r in rows)
+
+
+def cmd_setup_quiz(args):
+    """A quiz and its grade item, made from the brightspace: block in its file.
+
+    The file is a quiz written for extras/bs-yaml-quiz, whose README lists the
+    keys: the course, the quiz's name, the quiz to copy the settings from, the
+    dates, the timer, the attempts and a description in Markdown. The quiz goes
+    to a grade item of its own name, made like the one the copied quiz sends its
+    scores to, unless the block says grade_item: none; an item of that name
+    already there is the one it goes to. Every question is made into the CSV
+    first, so a quiz whose questions would not import is never made.
+
+    Without --go it prints what it would send. --check sets Brightspace beside
+    the file, the questions counted, and exits 1 on any difference. The
+    questions themselves go in by hand from the CSV, as the end of the run says:
+    no API route creates one.
+    """
+    if args.go and args.check:
+        raise Failed("--go or --check, not both")
+    plan = quiz_plan(pathlib.Path(args.file).expanduser())
+    args.course = plan["course"]
+    s, ou, _ = course(args)
+    print(quiz_summary(plan))
+    if args.check:
+        if not check_quiz(s, ou, plan):
+            sys.exit(1)
+        return
+    le, _ = s.versions()
+    quizzes = list(s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/"))
+    if any(same_name(q["Name"], plan["name"]) for q in quizzes):
+        raise Failed(f"{plan['course']} already has a quiz called {plan['name']!r}; --check reads it back")
+    template = quiz_detail(s, ou, plan["like"]) if "like" in plan else (quizzes[-1] if quizzes else None)
+    if not template:
+        raise Failed(f"{plan['course']} has no quiz to copy the settings from; make the first one by hand")
+    common = dict(vars(args), name=plan["name"], dry_run=not args.go)
+    attach = None
+    if plan["item"]:
+        items = grade_items(s, ou)
+        have = [g for g in items if same_name(g["Name"], plan["name"])]
+        shape = next((g for g in items if g["Id"] == template.get("GradeItemId")), None)
+        if have:
+            # A run that stopped between the two leaves the item; this picks it up.
+            print(f"The grade item {have[0]['Name']!r} is already there, out of {have[0].get('MaxPoints'):g}; "
+                  "the quiz goes to it.")
+            if "points" in plan and float(plan["points"]) != have[0].get("MaxPoints"):
+                print(f"  It is not out of {plan['points']}, as the file says: set-item does not change "
+                      "points, so change them in the web page.")
+            print()
+            attach = plan["name"]
+        elif not shape:
+            raise Failed(f"{template['Name']!r} sends its scores to no grade item, so there is none to shape "
+                         f"{plan['name']!r}'s like; make one with new-item first, or write grade_item: none")
+        else:
+            cmd_new_item(argparse.Namespace(**common, like=str(shape["Id"]), points=plan.get("points"),
+                                            category=None, weight=None, folder=None))
+            print()
+            attach = plan["name"] if args.go else None
+    make_quiz(argparse.Namespace(**common, like=str(template["QuizId"]), start=plan.get("start"),
+                                 end=plan.get("end"), minutes=plan.get("minutes"),
+                                 attempts=plan.get("attempts", "1"), ip=plan.get("ip"),
+                                 password=plan.get("password"), grade_item=attach, active=False),
+              description=plan.get("description_html"),
+              item_hint=("the file says grade_item: none" if not plan["item"] else
+                         "--go attaches the one made above, which a plan cannot name"))
+    print("\n" + quiz_remainder(plan, template["Name"], args.file))
+
+
 def cmd_classlist(args):
     s, ou, _ = course(args)
     le, _ = s.versions()
@@ -2800,6 +3061,13 @@ def main(argv=None):
     x.add_argument("--site", help="the course website repo to read (default: its site in the courses file)")
     x = with_course("announcements", cmd_announcements, help="the latest announcements, when each appears")
     x.add_argument("--last", type=int, default=10, help="how many (default 10)")
+
+    x = sub.add_parser("setup-quiz", help="a quiz and its grade item, made from the brightspace: block in its YAML",
+                       description=cmd_setup_quiz.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    x.add_argument("file", help="the quiz's .yml, as extras/bs-yaml-quiz reads it")
+    x.add_argument("--go", action="store_true", help="make them; without it, print what would be sent")
+    x.add_argument("--check", action="store_true", help="read them back and compare them with the file")
+    x.set_defaults(fn=cmd_setup_quiz)
 
     x = sub.add_parser("copy-quiz", help="copy the one quiz in a shell course into each of several sections",
                        description=cmd_copy_quiz.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

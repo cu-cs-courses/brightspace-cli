@@ -2,6 +2,23 @@
 # Everything in it is invented. Comments like these are for whoever edits the
 # quiz next, and never reach Brightspace.
 
+# Where the quiz goes and when it runs, for `brightspace.py setup-quiz
+# example.yml`, which makes the quiz and its grade item. The CSV carries none
+# of it; leave the block out of a quiz made by hand.
+brightspace:
+  course: 101                # a label from your courses file, or an org unit id
+  name: Quiz 4
+  like: Quiz 3               # the quiz whose settings it copies, its grade item's included
+  start: 2026-11-02 10:00
+  end: 2026-11-02 10:50
+  minutes: 8
+  attempts: 2
+  points: 14                 # what its grade item is out of
+  description: |
+    Five questions on this week's reading, and one from week 2.
+
+    **You get two attempts**, one now and one near the end of class.
+
 questions:
 
 # Short answer is for a question with one printable answer: what a program

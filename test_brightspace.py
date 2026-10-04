@@ -1,11 +1,12 @@
 """A fake Brightspace, and brightspace.py run against it as a subprocess.
 
-    nix-shell -p 'python3.withPackages(ps: [ps.lz4])' --run 'python3 test_brightspace.py'
+    nix-shell -p 'python3.withPackages(ps: [ps.lz4 ps.pyyaml])' --run 'python3 test_brightspace.py'
     MOCK_COOKIES_OK=0 ... same ...                 # /d2l/api/ refuses cookies: the token fallback
 
 lz4 is needed because the Firefox cases build a real session store, and because
 the interpreter running this is the one the tool is invoked with, bypassing its
-shebang.
+shebang. PyYAML is for setup-quiz, which reads a quiz's YAML; without it those
+cases are skipped and say so.
 
 The JSON here is the shape the Valence docs give for each route, cut down to
 the fields the tool reads; the mock is the record of what was assumed.
@@ -77,7 +78,7 @@ NEWS = [{"Id": 900, "Title": "Class 9, Closing Journal", "StartDate": "2026-09-2
 # A quiz's four rich-text fields in the read shape, as the live Quiz 2 returns them.
 RICH = {k: {"Text": {"Text": "", "Html": ""}, "IsDisplayed": k != "Instructions"}
         for k in ("Instructions", "Description", "Header", "Footer")}
-NEXT = {"folder": 88, "item": 777, "quiz": 5100}
+NEXT = {"folder": 88, "item": 777, "quiz": 5100, "made": 77}
 # A shell course for copy-quiz: no students and one quiz, which a copy job puts
 # into OU with its questions and without its grade item, as the live one does.
 SHELL = 1000500
@@ -343,12 +344,13 @@ class H(BaseHTTPRequestHandler):
                     if isinstance(v, dict) and not isinstance(v.get("Text"), dict):
                         return self.send(400, {"Errors": [{"Message": f"{key}.Text: expected RichTextInput"}]})
                 made = {k: v for k, v in body.items() if k != "NumberOfAttemptsAllowed"} | {
-                    "QuizId": 77, "AttemptsAllowed": {"IsUnlimited": body.get("NumberOfAttemptsAllowed") is None,
+                    "QuizId": NEXT["made"], "AttemptsAllowed": {"IsUnlimited": body.get("NumberOfAttemptsAllowed") is None,
                                                       "NumberOfAttemptsAllowed": body.get("NumberOfAttemptsAllowed")}}
                 for key in ("Instructions", "Description", "Header", "Footer"):
                     if isinstance(body.get(key), dict):
                         made[key] = {"Text": stored_rich(body[key]["Text"]), "IsDisplayed": body[key].get("IsDisplayed")}
                 QUIZZES_MADE.append(made)
+                NEXT["made"] += 1
                 return self.send(200, made)
             if r == "dropbox/folders/":
                 if refused_file_types(body):
@@ -1109,6 +1111,141 @@ if COOKIES_OK:
     run("set-folder", "240", "Linked", "--show", ok=False, has=["carries an attachment"])
     run("set-folder", "240", "Only arr", "--hide", ok=False,
         has=["takes .arr files only, which the API cannot send back"])
+
+    # setup-quiz: a quiz and its grade item, from the brightspace: block in the
+    # quiz's own YAML, which bs-yaml-quiz reads for it.
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        yaml = None
+        print("SKIP setup-quiz and its web form: this Python has no PyYAML; run the suite as its docstring says")
+    if yaml:
+        qdir = out / "quiz"
+        qdir.mkdir()
+        QUESTIONS = ('questions:\n- title: Q1 What it prints\n  type: SA\n'
+                     '  text: What does `printf("%d", 2 + 3)` print?\n  answers:\n  - 5\n  - five\n'
+                     '- title: Q2 Why\n  type: MC\n  points: 2\n  text: Why?\n'
+                     '  options:\n  - 100: Because.\n  - 0: Because not.\n')
+
+        def quiz_yml(fname, questions=QUESTIONS, description=True, **keys):
+            keys = {"course": "240", "name": "Quiz 13", "like": "Quiz 11", "start": "2026-10-13 12:30",
+                    "end": "2026-10-13 14:00", "minutes": "8", "attempts": "2", "points": "8"} | keys
+            text = "brightspace:\n" + "".join(f"  {k}: {v}\n" for k, v in keys.items() if v is not None)
+            if description:
+                text += "  description: |\n    Two questions on **pointers**.\n\n    *Two attempts*, both today.\n"
+            (qdir / fname).write_text(text + "\n" + questions)
+            return str(qdir / fname)
+
+        q13 = quiz_yml("q13.yml")
+        before = (len(QUIZZES_MADE), len(ITEMS))
+        run("setup-quiz", q13,
+            has=["Quiz 13 in 240: 2 questions from q13.yml, worth 3",
+                 "opens 2026-10-13 12:30, closes 2026-10-13 14:00; 8 minutes, 2 attempts",
+                 "settings copied from 'Quiz 11'; scores to a grade item 'Quiz 13', out of 8; a description",
+                 '"Name": "Quiz 13"', '"MaxPoints": 8.0', '"NumberOfAttemptsAllowed": 2', '"TimeLimitValue": 8',
+                 "<p>Two questions on <strong>pointers</strong>.</p><p><em>Two attempts</em>, both today.</p>",
+                 "modelled on 'Quiz 11', with its instructions and header emptied and its description written",
+                 "no grade item: --go attaches the one made above", "nothing sent",
+                 "Upload a File -> q13.csv, which bs-yaml-quiz.py", "Quiz 13 -> Add Existing -> the 2 questions",
+                 "none came from 'Quiz 11'", "--check reads it all back"])
+        fails += (len(QUIZZES_MADE), len(ITEMS)) != before
+        print("   a plan sends nothing:", (len(QUIZZES_MADE), len(ITEMS)) == before)
+        # The CSV beside the file, once made, is named without a word; stale, it is said.
+        subprocess.run([sys.executable, str(pathlib.Path(SCRIPT).parent / "extras" / "bs-yaml-quiz" / "bs-yaml-quiz.py"),
+                        q13], check=True, capture_output=True)
+        run("setup-quiz", q13, has=["Upload a File -> q13.csv.\n"])
+        run("setup-quiz", q13, "--go",
+            has=["created grade item 'Quiz 13'", "created quiz 'Quiz 13'",
+                 "checked on the server: name, start, end, attempts, time limit, IP range, password, grade item, "
+                 "description"], lacks=["no grade item:"])
+        made = QUIZZES_MADE[-1]
+        good = made["GradeItemId"] == ITEMS[-1]["Id"] and ITEMS[-1]["MaxPoints"] == 8.0 and made["AutoExportToGrades"]
+        fails += not good; print("   the quiz sends its scores to the new item, out of 8:", good)
+        # Its questions go in by hand, so --check finds none until they do.
+        t = run("setup-quiz", q13, "--check", ok=False, has=["DIFFERS"])
+        fails += not re.search(r"\nquestions +2 +0 +DIFFERS\n", t)
+        print("   the questions not added yet are the one difference:", t.count("DIFFERS") == 1)
+        COPIED[made["QuizId"]] = 2
+        run("setup-quiz", q13, "--check", has=["2026-10-13 14:00", "8 minutes", "Quiz 13", "q13.csv", "current"],
+            lacks=["DIFFERS"])
+        # A date moved in the file and not on Brightspace, and a question changed
+        # after the CSV was made, are what --check is for.
+        quiz_yml("q13.yml", end="2026-10-13 14:15", questions=QUESTIONS.replace("- five", "- five\n  - 5.0"))
+        run("setup-quiz", q13, "--check", ok=False, has=["2026-10-13 14:15", "2026-10-13 14:00", "stale", "DIFFERS"])
+        run("setup-quiz", q13, "--go", ok=False, has=["240 already has a quiz called 'Quiz 13'", "--check reads it back"])
+        run("setup-quiz", q13, "--go", "--check", ok=False, has=["--go or --check, not both"])
+        # An item of the quiz's name already there is the one it goes to.
+        run("new-item", "240", "Quiz 14", "--like", "Assignment 1")
+        run("setup-quiz", quiz_yml("q14.yml", name="Quiz 14"), "--go",
+            has=["The grade item 'Quiz 14' is already there, out of 10; the quiz goes to it",
+                 "It is not out of 8, as the file says", "created quiz 'Quiz 14'"], lacks=["created grade item"])
+        # A quiz copied from one with no grade item needs one made first, or the file to say none.
+        run("setup-quiz", quiz_yml("q15.yml", name="Quiz 15", like="Quiz 2", points=None), ok=False,
+            has=["'Quiz 2' sends its scores to no grade item", "grade_item: none"])
+        run("setup-quiz", quiz_yml("q15.yml", name="Quiz 15", like="Quiz 2", points=None, grade_item="none"), "--go",
+            has=["no grade item: the file says grade_item: none", "created quiz 'Quiz 15'"],
+            lacks=["created grade item"])
+        # What the block refuses, each before anything is read off Brightspace.
+        for keys, why in [({"atempts": "2"}, "brightspace: has atempts, which setup-quiz does not know"),
+                          ({"name": None}, "brightspace: has no name"),
+                          ({"start": "tomorrow"}, "start: 'tomorrow' is not a date and time"),
+                          ({"minutes": "eight"}, "minutes: is a whole number, not 'eight'"),
+                          ({"ip": "campus"}, "ip: is a range like"),
+                          ({"grade_item": "Quiz 13"}, "grade_item: is none, or left out"),
+                          ({"grade_item": "none"}, "points: is what its grade item is out of"),
+                          ({"course": "nope"}, "nope")]:
+            run("setup-quiz", quiz_yml("bad.yml", **({"name": "Quiz 16"} | keys)), ok=False, has=[why],
+                lacks=["Traceback"])
+        broken = pathlib.Path(quiz_yml("bad.yml", name="Quiz 16", description=False))
+        broken.write_text(broken.read_text().replace("\n\nquestions:", "\n  description: |\n    ```\n    open\n\nquestions:"))
+        run("setup-quiz", str(broken), ok=False, has=["description: a block opened with ``` is never closed"],
+            lacks=["Traceback"])
+        (qdir / "bare.yml").write_text(QUESTIONS)
+        run("setup-quiz", str(qdir / "bare.yml"), ok=False, has=["has no brightspace: block"])
+        run("setup-quiz", quiz_yml("bad.yml", name="Quiz 16", questions=QUESTIONS.replace("type: MC", "type: XX")),
+            ok=False, has=["question 2"], lacks=["Traceback"])
+        run("setup-quiz", str(qdir / "nowhere.yml"), ok=False, has=["nowhere.yml"], lacks=["Traceback"])
+
+        # The same file on the page: pasted or chosen, then checked, made or compared.
+        proc, wport, first = start_web()
+        here = f"127.0.0.1:{wport}"
+        got = fetch(wport, here)
+        web_check("web: the page has both forms", got, 200,
+                  has=['action="/setup-quiz"', 'name="yaml"', 'action="/copy-quiz"'])
+        token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
+        text16 = pathlib.Path(quiz_yml("q16.yml", name="Quiz 16")).read_text().replace("\n", "\r\n")
+        web_check("web: a quiz file without the page's token is refused",
+                  fetch(wport, here, "/setup-quiz", {"yaml": text16, "action": "plan"}), 403, has=["Reload the page"])
+        before = len(QUIZZES_MADE)
+        got = fetch(wport, here, "/setup-quiz", {"token": token, "yaml": text16, "filename": "q16.yml", "action": "plan"})
+        web_check("web: Check runs setup-quiz without --go, with the CSV to download", got, 200,
+                  has=["Checked: nothing sent", "brightspace.py setup-quiz q16.yml",
+                       "Quiz 16 in 240: 2 questions from q16.yml", 'download="q16.csv"', "data:text/csv;",
+                       "Upload a File -&gt; q16.csv.", "Two questions on **pointers**."],
+                  lacks=["setup-quiz-"])
+        csv16 = base64.b64decode(re.search(r"base64,([A-Za-z0-9+/=]+)", got[1]).group(1)).decode()
+        fails += not csv16.startswith("NewQuestion,SA") or "\r\n" not in csv16
+        print("   the download is the question-import CSV:", csv16.startswith("NewQuestion,SA"))
+        fails += len(QUIZZES_MADE) != before; print("   checking sent nothing:", len(QUIZZES_MADE) == before)
+        web_check("web: Make it makes the quiz and its grade item",
+                  fetch(wport, here, "/setup-quiz", {"token": token, "yaml": text16, "filename": "q16.yml",
+                                                     "action": "go"}), 200,
+                  has=["Made", "brightspace.py setup-quiz q16.yml --go", "created quiz &#x27;Quiz 16&#x27;"])
+        web_check("web: Compare reads it back, the questions not in yet",
+                  fetch(wport, here, "/setup-quiz", {"token": token, "yaml": text16, "filename": "q16.yml",
+                                                     "action": "check"}), 200,
+                  has=["Not what the file says", "--check", "DIFFERS"])
+        web_check("web: a file name that could be an option is not used as one",
+                  fetch(wport, here, "/setup-quiz", {"token": token, "yaml": text16, "filename": "-x.yml",
+                                                     "action": "plan"}), 200,
+                  has=["brightspace.py setup-quiz quiz.yml", "already has a quiz called &#x27;Quiz 16&#x27;"])
+        web_check("web: a file with no block says why, and offers no CSV",
+                  fetch(wport, here, "/setup-quiz", {"token": token, "yaml": QUESTIONS, "action": "plan"}), 200,
+                  has=["Stopped", "has no brightspace: block"], lacks=["download="])
+        web_check("web: an empty box is not run",
+                  fetch(wport, here, "/setup-quiz", {"token": token, "yaml": " ", "action": "plan"}), 200,
+                  has=["Not run", "paste it into the box"])
+        proc.terminate(); proc.wait()
 
 # --- deleting: only a quiz with nothing in it --------------------------------
 if COOKIES_OK:

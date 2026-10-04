@@ -17,6 +17,10 @@ blank row after every question, UTF-8 with no BOM and CRLF line endings.
 Every value in the YAML is read as the text written. An answer of 010, 0.10
 or yes stays exactly that; nothing turns into a number or a boolean.
 
+A `brightspace:` block beside the questions says where the quiz goes and when
+it runs, for brightspace.py setup-quiz. The CSV never carries it: here it only
+has to be a block of text values, and what each means is setup-quiz's.
+
 Going from a CSV, nothing is written that does not convert back to the same
 rows, and the run says when the bytes differ as well -- in line endings, say.
 A row this tool does not know stops it, rather than being dropped.
@@ -34,6 +38,8 @@ import sys
 try:
     import yaml
 except ImportError:
+    if __name__ != "__main__":
+        raise     # brightspace.py reads a quiz file through this, and says so itself
     sys.exit("bs-yaml-quiz.py needs PyYAML: `pip install pyyaml`, or on Nix "
              "python3.withPackages (ps: [ ps.pyyaml ])")
 
@@ -451,8 +457,16 @@ def question_rows(q, where):
 
 def to_csv(data, where):
     """The CSV text, CRLF line endings, for a loaded quiz document."""
-    if not isinstance(data, dict) or list(data) != ["questions"] or not isinstance(data["questions"], list):
-        raise Failed(f"{where}: a quiz file is `questions:` and the list of them")
+    if (not isinstance(data, dict) or "questions" not in data or set(data) - {"questions", "brightspace"}
+            or not isinstance(data["questions"], list)):
+        raise Failed(f"{where}: a quiz file is `questions:` and the list of them, "
+                     "and a `brightspace:` block if brightspace.py is to make the quiz")
+    block = data.get("brightspace")
+    # What the keys mean is brightspace.py's, which refuses one it does not know;
+    # here the block only has to be a block, so the CSV never depends on it.
+    if not isinstance(block, (dict, type(None))) or any(
+            not isinstance(v, str) for v in (block or {}).values()):
+        raise Failed(f"{where}: `brightspace:` is a block of `key: value` lines, each value text")
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
     for n, q in enumerate(data["questions"], 1):

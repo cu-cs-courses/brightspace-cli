@@ -107,6 +107,47 @@ so that the CSV is the same every time and the same as one written by hand:
 `html:` in place of `text:` takes the question's HTML as it goes into the CSV,
 and `plain_text:` takes text that D2L is to show without reading HTML at all.
 
+## Where it goes on Brightspace
+
+A file can also carry a `brightspace:` block, above its questions, saying
+which course the quiz goes in and when it runs. `brightspace.py setup-quiz`
+makes the quiz and its grade item from it, and brightspace-cli's web page takes
+the same file. The CSV carries none of it, so a quiz made by hand leaves the
+block out.
+
+```yaml
+brightspace:
+  course: 240
+  name: Quiz 5
+  like: Quiz 4
+  start: 2026-10-06 12:30
+  end: 2026-10-06 14:00
+  minutes: 8
+  attempts: 2
+  points: 8
+  description: |
+    Eight questions on this week's reading.
+
+    **You get two attempts**, one now and one near the end of class.
+```
+
+| key | what it is |
+|---|---|
+| `course` | A label from your courses file, or an org unit id. |
+| `name` | The quiz's name, and its grade item's. |
+| `like` | The quiz it copies its settings from: shuffle, auto-publish, paging and the rest. The course's last quiz when left out. |
+| `start`, `end` | Local time, as `2026-10-06 12:30`; the end is its due date too. No dates when left out. |
+| `minutes` | A time limit, enforced. The copied quiz's when left out. |
+| `attempts` | How many. 1 when left out. |
+| `ip`, `password` | The addresses it can be taken from, as `148.137.150.0-148.137.150.255`, and a password. |
+| `points` | What its grade item is out of, when one is made. The copied item's when left out. |
+| `grade_item` | `none` for no grade item. Left out, the quiz goes to an item of its own name, made like the one `like` sends its scores to if there is none yet. |
+| `description` | What students read before they start, in Markdown, as a question's text is. |
+
+The quiz is made hidden, to be shown once its questions are in. Those go in by
+hand, from the CSV, since no API route creates a question; `setup-quiz` ends
+by saying how.
+
 ## What the CSV has to get right
 
 D2L's question-import CSV is the route into a Question Library that works where
@@ -124,8 +165,8 @@ tool handles and one of which it cannot:
 - **Do not open the CSV in Excel and save it.** Its "CSV UTF-8" adds a BOM and
   mangles the HTML.
 - **Importing puts questions in the Question Library only.** The quiz itself
-  is made in the web page or with `brightspace.py new-quiz`, and its questions
-  added with *Add Existing*. **Importing again after a fix adds a second copy**
+  is made in the web page or with `brightspace.py setup-quiz`, from the block
+  above, and its questions added with *Add Existing*. **Importing again after a fix adds a second copy**
   of every question; delete the first section before re-importing.
 
 ## From a CSV

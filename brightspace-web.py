@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A web page for brightspace.py, for whoever would rather not type its commands.
-Copying a quiz into several sections, so far.
+Making a quiz from its YAML file, and copying a quiz into several sections, so far.
 
     ./brightspace-web.py                          on your own machine, as you
     ./brightspace-web.py --access web.ini         behind Cloudflare Access, as whoever signed in
@@ -48,6 +48,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -165,7 +166,7 @@ class Access:
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Brightspace: copy a quiz</title>
+<title>Brightspace quizzes</title>
 <style>
 :root {{ --bg: #fbfbf9; --fg: #1f1f1f; --muted: #666; --line: #d8d8d2; --box: #fff;
          --ok: #1d6b36; --bad: #a12a1f; --accent: #2d4f8a; }}
@@ -183,9 +184,12 @@ legend {{ font-weight: 600; padding: 0 .3rem; }}
 .hint {{ color: var(--muted); font-size: .9rem; margin: .1rem 0 .6rem; }}
 label {{ display: block; margin: .3rem 0; }}
 .name {{ color: var(--muted); font-size: .9rem; }}
-select, input[type=text] {{ font: inherit; padding: .35rem .5rem; border: 1px solid var(--line);
-                             border-radius: 6px; background: var(--bg); color: var(--fg); width: 100%;
-                             box-sizing: border-box; }}
+select, input[type=text], textarea {{ font: inherit; padding: .35rem .5rem; border: 1px solid var(--line);
+                                       border-radius: 6px; background: var(--bg); color: var(--fg); width: 100%;
+                                       box-sizing: border-box; }}
+textarea {{ font: .85rem/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; margin-top: .6rem; resize: vertical; }}
+h2.part {{ font-size: 1.15rem; margin: 2.25rem 0 .75rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }}
+h2.part:first-of-type {{ border-top: 0; padding-top: 0; margin-top: 0; }}
 .buttons {{ display: flex; gap: .75rem; flex-wrap: wrap; margin-top: 1.25rem; }}
 button {{ font: inherit; padding: .5rem 1.1rem; border-radius: 6px; border: 1px solid var(--accent);
           cursor: pointer; background: var(--box); color: var(--accent); }}
@@ -198,8 +202,27 @@ pre {{ background: var(--box); border: 1px solid var(--line); border-radius: 8px
 code {{ font-size: .9em; }}
 </style></head>
 <body><main>
-<h1>Copy a quiz into several sections</h1>
+<h1>Quizzes on Brightspace</h1>
 <p class="who">{who}</p>
+<h2 class="part">Make a quiz from its file</h2>
+<form method="post" action="/setup-quiz">
+<input type="hidden" name="token" value="{token}">
+<input type="hidden" name="filename" value="{filename}">
+<fieldset><legend>The quiz</legend>
+<p class="hint">A quiz written for bs-yaml-quiz, whose <code>brightspace:</code> block says which course it
+goes in, when it runs and which quiz it copies its settings from. Choose its file, or paste it below. Its grade
+item is made with it; its questions go in afterwards, from the CSV this hands back.</p>
+<input type="file" accept=".yml,.yaml" id="pick">
+<textarea name="yaml" rows="14" spellcheck="false" required>{yaml}</textarea>
+</fieldset>
+<div class="buttons">
+<button name="action" value="plan">Check, and send nothing</button>
+<button name="action" value="go" class="go">Make it</button>
+<button name="action" value="check">Compare with Brightspace</button>
+</div>
+</form>
+{made}
+<h2 class="part">Copy a quiz into several sections</h2>
 <form method="post" action="/copy-quiz">
 <input type="hidden" name="token" value="{token}">
 <fieldset><legend>From</legend>
@@ -223,8 +246,16 @@ ready for the next one</label>
 <button name="action" value="copy" class="go">Copy</button>
 </div>
 </form>
-{result}
-</main></body></html>
+{copied}
+</main>
+<script>
+// Reads the chosen file into the box, so that each button sends the same text.
+document.getElementById("pick").addEventListener("change", function () {{
+  var file = this.files[0], form = this.form;
+  if (file) file.text().then(function (text) {{ form.yaml.value = text; form.filename.value = file.name; }});
+}});
+</script>
+</body></html>
 """
 
 REFUSED = """<!doctype html>
@@ -265,7 +296,7 @@ def known(user):
     return who, rows
 
 
-def page(user, form=None, result=""):
+def page(user, form=None, made="", copied=""):
     form = form or {}
     who, rows = known(user)
     esc = html.escape
@@ -277,7 +308,8 @@ def page(user, form=None, result=""):
                        f'<span class="name">{esc(name)}</span></label>' for label, _, name in rows)
     return PAGE.format(who=esc(who), token=TOKEN, shells=shells, sections=sections or "<p>No courses yet.</p>",
                        item_like=esc(form.get("item_like", "")), clear="checked" if form.get("clear") else "",
-                       result=result)
+                       yaml=esc(form.get("yaml", "")), filename=esc(form.get("filename", "")),
+                       made=made, copied=copied)
 
 
 def run_copy(form, labels, user):
@@ -297,12 +329,43 @@ def run_copy(form, labels, user):
         argv.append("--go")
         if form.get("clear"):
             argv.append("--clear")
+    return command(argv, user)
+
+
+def command(argv, user, cwd=None):
+    """brightspace.py with these arguments, as the user: (the command line, exit status, output)."""
     env = dict(os.environ)
     if user:
         env |= {"BRIGHTSPACE_SESSION": user["session"], "BRIGHTSPACE_COURSES": str(user["courses"])}
     r = subprocess.run([sys.executable, str(HERE / "brightspace.py"), *argv],
-                       capture_output=True, text=True, timeout=1800, env=env)
+                       capture_output=True, text=True, timeout=1800, env=env, cwd=cwd)
     return "brightspace.py " + " ".join(map(shell_word, argv)), r.returncode, (r.stdout + r.stderr).strip()
+
+
+def run_setup(form, user):
+    """setup-quiz for a quiz file sent from the page, run as the user, in a
+    directory of its own that holds the file and the CSV made from it, as
+    bs-yaml-quiz.py would leave them: (the command line, exit status, output,
+    (the CSV's name, its text) or None)."""
+    text = form.get("yaml", "").replace("\r\n", "\n")
+    if not text.strip():
+        raise ValueError("choose the quiz's file, or paste it into the box")
+    name = pathlib.PurePath(form.get("filename") or "").name
+    if not re.fullmatch(r"\w[\w.-]*\.ya?ml", name):     # never an option, never a path
+        name = "quiz.yml"
+    argv = ["setup-quiz", name, *{"go": ["--go"], "check": ["--check"]}.get(form.get("action"), [])]
+    csv = None
+    with tempfile.TemporaryDirectory(prefix="setup-quiz-") as tmp:
+        src = pathlib.Path(tmp) / name
+        src.write_text(text, encoding="utf-8")
+        try:
+            fmt = B.quiz_format()
+            csv = (src.with_suffix(".csv").name, fmt.to_csv(fmt.load(text), name))
+            src.with_suffix(".csv").write_bytes(csv[1].encode("utf-8"))
+        except Exception:
+            csv = None      # whatever stops the CSV, setup-quiz reports it in its own words
+        line, code, output = command(argv, user, cwd=tmp)
+    return line, code, output, csv
 
 
 def shell_word(arg):
@@ -365,27 +428,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.user()
         except (Refused, OSError, ValueError, B.Failed) as e:
             return self.reply(403, REFUSED.format(why=html.escape(str(e))))
-        if urllib.parse.urlsplit(self.path).path != "/copy-quiz":
+        where = urllib.parse.urlsplit(self.path).path
+        if where not in ("/copy-quiz", "/setup-quiz"):
             return self.reply(404, REFUSED.format(why="Nothing is at that address."))
         size = int(self.headers.get("Content-Length") or 0)
+        if size > 2_000_000:
+            return self.reply(413, REFUSED.format(why="That is more than a quiz file; nothing was run."))
         fields = urllib.parse.parse_qs(self.rfile.read(size).decode("utf-8"), keep_blank_values=True)
         form = {k: (v if k == "to" else v[0]) for k, v in fields.items()}
         if not secrets.compare_digest(form.get("token", ""), TOKEN):
             return self.reply(403, REFUSED.format(why="That form is from an earlier run of this page, or from "
                                                       "somewhere else. Reload the page and try again."))
+        slot = "made" if where == "/setup-quiz" else "copied"
         try:
-            command, code, output = run_copy(form, [label for label, _, _ in known(user)[1]], user)
+            if where == "/setup-quiz":
+                line, code, output, csv = run_setup(form, user)
+            else:
+                (line, code, output), csv = run_copy(form, [label for label, _, _ in known(user)[1]], user), None
         except ValueError as e:
             result = f'<section class="result"><h2 class="bad">Not run</h2><p>{html.escape(str(e))}</p></section>'
-            return self.reply(200, page(user, form, result))
+            return self.reply(200, page(user, form, **{slot: result}))
         except subprocess.TimeoutExpired:
             result = ('<section class="result"><h2 class="bad">Still running after half an hour</h2>'
-                      "<p>Look in the sections before trying again.</p></section>")
-            return self.reply(200, page(user, form, result))
-        verdict = ("Checked: nothing sent" if form.get("action") != "copy" else "Copied") if code == 0 else "Stopped"
+                      "<p>Look in Brightspace before trying again.</p></section>")
+            return self.reply(200, page(user, form, **{slot: result}))
+        action = form.get("action")
+        if where == "/copy-quiz":
+            verdict = "Stopped" if code else "Copied" if action == "copy" else "Checked: nothing sent"
+        elif code:
+            verdict = "Not what the file says, or not compared: below is why" if action == "check" else "Stopped"
+        else:
+            verdict = {"go": "Made", "check": "Brightspace has what the file says"}.get(action, "Checked: nothing sent")
+        download = ""
+        if csv and not code:
+            data = base64.b64encode(csv[1].encode("utf-8")).decode()
+            download = (f'<p><a download="{html.escape(csv[0])}" href="data:text/csv;charset=utf-8;base64,{data}">'
+                        f"Download {html.escape(csv[0])}</a>, the questions for the Question Library's "
+                        "Import, made from the file.</p>")
         result = (f'<section class="result"><h2 class="{"ok" if code == 0 else "bad"}">{verdict}</h2>'
-                  f"<p><code>{html.escape(command)}</code></p><pre>{html.escape(output)}</pre></section>")
-        self.reply(200, page(user, form, result))
+                  f"<p><code>{html.escape(line)}</code></p>{download}<pre>{html.escape(output)}</pre></section>")
+        self.reply(200, page(user, form, **{slot: result}))
 
 
 def main(argv=None):
