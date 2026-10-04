@@ -1,0 +1,60 @@
+# An example quiz: `bs-yaml-quiz.py example.yml` writes example.csv beside it.
+# Everything in it is invented. Comments like these are for whoever edits the
+# quiz next, and never reach Brightspace.
+
+questions:
+
+# Short answer is for a question with one printable answer: what a program
+# prints, a number, one identifier. Every spelling that counts is listed,
+# since D2L compares strings; casing needs no rows of its own.
+- title: Q1 A loop that adds
+  type: SA
+  text: |
+    You run this:
+
+    ```java
+    int total = 0;
+    for (int i = 1; i <= 3; i++) {
+        total += i;
+    }
+    System.out.println(total);
+    ```
+
+    What does it print? *Write the number.*
+  answers:
+  - 6
+  - six
+  width: 12
+
+# Multiple choice is for a why, which has no printable answer. The wrong
+# options are the wrong models a student might hold, one each.
+- title: Q2 Why it compiles
+  type: MC
+  text: Why does `Object o = "hi";` compile?
+  options:
+  - 100: Because every class, String included, is a subclass of Object.
+    feedback: A String is an Object, so the assignment needs no conversion.
+  - 0: Because the compiler converts the text to an Object at run time.
+  - 0: Because Object is an interface that String implements.
+
+- title: Q3 A method of your own
+  type: WR
+  points: 10
+  text: |
+    Write a method `twice(int n)` that gives back **two times** `n`, and show
+    it called once, with what it gives back.
+  initial_text: 'public static int twice(int n) {'
+
+- title: Q4 Strings are objects
+  type: TF
+  text: In Java, `String` is a class.
+  correct: true
+
+- title: Q5 Which lines compile
+  type: MS
+  text: Which of these lines compile? *Choose every one that does.*
+  scoring: RightAnswers
+  options:
+  - 1: int x = 3;
+  - 1: String s = "3";
+  - 0: int y = "3";

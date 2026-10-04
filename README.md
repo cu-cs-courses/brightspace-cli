@@ -480,6 +480,13 @@ minted bearer token. `announcements` reads them, which works.
 *Per-question quiz results.* `quizzes` gives the attempt counts, which is the
 denominator the Statistics page does not print.
 
+## Extras
+
+[`extras/bs-yaml-quiz/`](extras/bs-yaml-quiz/README.md) writes a quiz as YAML,
+with each question's text in Markdown, and turns it into the question-import
+CSV that puts it in a Question Library; and a CSV made another way back into
+YAML. `new-quiz` then makes the quiz the questions go into.
+
 ## Tests
 
     python3 test_brightspace.py
