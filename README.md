@@ -59,7 +59,8 @@ Everything the tool keeps, and everything it reads apart from Brightspace:
 | A course site's `_quarto.yml`, `assignments.yml` and `config/brightspace.yml` | The org unit id, and what `setup` makes. | You. Only read here. |
 | A course's `dropbox/journals/` and `dropbox/submissions/` | Downloads: student work. | `journal`, `submissions --download`. |
 
-`$BRIGHTSPACE_STATE_DIR` names another session directory and
+`$BRIGHTSPACE_STATE_DIR` names another session directory,
+`$BRIGHTSPACE_SESSION` a session by its `[name]` in the keepalive file, and
 `$BRIGHTSPACE_COURSES` another courses file; `$XDG_STATE_HOME` and
 `$XDG_CONFIG_HOME` move all three of the first files as usual. No password is
 ever kept. `login`, for a local D2L account, drops its password as soon as the
@@ -503,6 +504,44 @@ minted bearer token. `announcements` reads them, which works.
 
 *Per-question quiz results.* `quizzes` gives the attempt counts, which is the
 denominator the Statistics page does not print.
+
+## A web page
+
+`brightspace-web.py` puts `copy-quiz` on a page, for whoever would rather not
+type it; the rest of the commands can follow. Each button runs the command the
+page shows and prints what it printed, so the page checks and refuses exactly
+what the command does.
+
+    ./brightspace-web.py                      on your own machine, as you; it opens itself
+    ./brightspace-web.py --access web.ini     behind Cloudflare Access, as whoever signed in
+
+**Behind Cloudflare Access** it acts as whoever Access says signed in, each
+with a session of their own from the keepalive file and a courses file of
+their own, as `web.ini` lists them:
+
+```ini
+[access]
+team = yourteam.cloudflareaccess.com
+aud = 4714c1a2...
+host = brightspace.example.edu
+
+[user ada@example.edu]
+session = ada
+courses = ~/.config/brightspace/courses.ini
+```
+
+`team` and `aud` are the Access application's, and any hostname it protects
+shows both: Access sends a visitor to
+`https://<team>/cdn-cgi/access/login/<host>?kid=<aud>`. **It checks the
+token Access signs on every request itself**, signature against the keys
+Access publishes, audience, issuer and expiry, before it acts as anyone: a
+header proves nothing, since anything on the same machine can send one. Until
+`web.ini` names the application, it refuses everything, and someone Access
+let in who is not listed is told the email they signed in with.
+
+Either way it listens on 127.0.0.1 only, answers only a request addressed to
+the name it serves, refuses a form posted from another site, and each form
+carries a token made when it starts.
 
 ## Extras
 

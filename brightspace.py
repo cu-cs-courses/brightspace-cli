@@ -225,20 +225,21 @@ def file_path(path, value):
     return p if p.is_absolute() else path.resolve().parent / p
 
 
-def course_entries():
-    """label -> its keys, from the courses file; empty when there is none."""
-    if not COURSES_FILE.exists():
+def course_entries(path=None):
+    """label -> its keys, from the courses file (or path); empty when there is none."""
+    path = path or COURSES_FILE
+    if not path.exists():
         return {}
     out = {}
-    for label, keys in read_ini(COURSES_FILE):
+    for label, keys in read_ini(path):
         wrong = sorted(set(keys) - set(COURSE_KEYS))
         if wrong:
-            raise Failed(f"{COURSES_FILE}, [{label}]: no such key {', '.join(wrong)}; "
+            raise Failed(f"{path}, [{label}]: no such key {', '.join(wrong)}; "
                          f"a course takes {', '.join(COURSE_KEYS)}")
         if not (keys.get("site") or keys.get("ou")):
-            raise Failed(f"{COURSES_FILE}, [{label}]: needs a site, an ou, or both")
+            raise Failed(f"{path}, [{label}]: needs a site, an ou, or both")
         if keys.get("ou") and not keys["ou"].isdigit():
-            raise Failed(f"{COURSES_FILE}, [{label}]: ou is a number, the org unit id in its /d2l/home/ URL")
+            raise Failed(f"{path}, [{label}]: ou is a number, the org unit id in its /d2l/home/ URL")
         out[label] = keys
     return out
 
@@ -273,17 +274,18 @@ def quarto_urls(site):
     return out
 
 
-def course_site(label):
-    """The Course a label names in the courses file, or a bare org unit id's.
+def course_site(label, path=None):
+    """The Course a label names in the courses file (or path), or a bare org unit id's.
 
     An ou written in the file wins over the site's, which is how a site shared
     by several sections names each one.
     """
-    entries = course_entries()
+    path = path or COURSES_FILE
+    entries = course_entries(path)
     if label in entries:
         keys = entries[label]
-        site = file_path(COURSES_FILE, keys["site"]) if keys.get("site") else None
-        dropbox = file_path(COURSES_FILE, keys["dropbox"]) if keys.get("dropbox") else None
+        site = file_path(path, keys["site"]) if keys.get("site") else None
+        dropbox = file_path(path, keys["dropbox"]) if keys.get("dropbox") else None
         host, ou = None, int(keys["ou"]) if keys.get("ou") else None
         if site:
             url = quarto_urls(site).get("brightspace", "")
@@ -293,14 +295,14 @@ def course_site(label):
                 ou = int(m.group(2))
             if ou is None:
                 raise Failed(f"{site / '_quarto.yml'}: no urls.brightspace of the form "
-                             f"https://host/d2l/home/<id>, so [{label}] in {COURSES_FILE} needs an ou")
+                             f"https://host/d2l/home/<id>, so [{label}] in {path} needs an ou")
         return Course(host, ou, site, dropbox)
     if label.isdigit():
         return Course(None, int(label), None, None)
     if entries:
         raise Failed(f"unknown course {label!r}: one of {', '.join(entries)} "
-                     f"from {COURSES_FILE}, or an org unit id")
-    raise Failed(f"unknown course {label!r}: an org unit id, or a label in {COURSES_FILE}, "
+                     f"from {path}, or an org unit id")
+    raise Failed(f"unknown course {label!r}: an org unit id, or a label in {path}, "
                  "which does not exist. `brightspace.py courses` lists your org unit ids.")
 
 
@@ -640,8 +642,22 @@ def whoami(s):
     return s.api(f"/d2l/api/lp/{lp}/users/whoami")
 
 
-def open_session(args, host=None):
-    s = Session(base_url(args, host))
+def open_session(args, host=None, session=None):
+    """The session a command acts as: the one `session` saved, or the one named
+    [session] in the keepalive file -- the argument, or $BRIGHTSPACE_SESSION --
+    which is how a server acts for whichever of its people asked."""
+    named = session or os.environ.get("BRIGHTSPACE_SESSION")
+    if not named:
+        s = Session(base_url(args, host))
+    else:
+        hits = [(state, cookies) for name, state, cookies in keepalive_entries(KEEPALIVE_FILE) if name == named]
+        if not hits:
+            raise NotLoggedIn(f"no session [{named}] in {KEEPALIVE_FILE}")
+        state, cookies = hits[0]
+        s = Session(base_url(args, host), state)
+        if cookies:
+            s.take_cookies(cookies)
+            return s
     if not (s.state / "cookies.txt").exists() and not s.bearer:
         raise NotLoggedIn(f"no session in {s.state}: run `brightspace.py session`")
     return s

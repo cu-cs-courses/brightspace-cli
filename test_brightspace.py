@@ -10,7 +10,8 @@ shebang.
 The JSON here is the shape the Valence docs give for each route, cut down to
 the fields the tool reads; the mock is the record of what was assumed.
 """
-import datetime as dt, json, os, pathlib, re, subprocess, sys, tempfile, threading, urllib.parse
+import base64, datetime as dt, hashlib, json, os, pathlib, random, re, subprocess, sys, tempfile, threading
+import urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCRIPT = str(pathlib.Path(__file__).with_name("brightspace.py"))
@@ -86,6 +87,7 @@ SHELLS = {"quizzes": [{"QuizId": 5001, "Name": "Quiz 9", "IsActive": False, "Due
                        "AttemptsAllowed": {"IsUnlimited": False, "NumberOfAttemptsAllowed": 2}}],
           "people": [{"DisplayName": "Ada L", "ClasslistRoleDisplayName": "Instructor"}], "questions": 3}
 JOBS, COPIED = {}, {}                       # copy jobs by token; questions of each copied quiz
+ACCESS_KEYS = {"keys": []}                  # Cloudflare Access's public keys, as brightspace-web fetches them
 COPYING = {"slow": False, "fail": False}    # a job that reads PROCESSING once; one that ends FAILED
 
 def stored_rich(v):
@@ -138,6 +140,8 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path); q = urllib.parse.parse_qs(u.query); p = u.path
         port = self.server.server_address[1]
+        if p == "/cdn-cgi/access/certs":      # Cloudflare Access's published keys, for brightspace-web
+            return self.send(200, ACCESS_KEYS)
         if p == "/d2l/login":
             sso = "" if os.environ.get("MOCK_NO_SSO") else "<button class='d2l-button d2l-button-sso-1'>Commonwealth User Login</button>"
             return self.send(200, f"<html>{sso}<form data-location='/d2l/lp/auth/login/login.d2l'><input name='userName'><input name='password'></form>"
@@ -878,6 +882,146 @@ if COOKIES_OK:
         has=["ended FAILED, so nothing else was done here", "not done in 240; the shell keeps its quiz"])
     COPYING["fail"] = False
     fails += len(SHELLS["quizzes"]) != 1; print("   the shell keeps its quiz after a failure:", len(SHELLS["quizzes"]) == 1)
+
+    # --- brightspace-web: the page over copy-quiz ------------------------------------
+    WEB = str(pathlib.Path(SCRIPT).with_name("brightspace-web.py"))
+    webconf = pathlib.Path(tempfile.mkdtemp())
+    (webconf / "brightspace").mkdir(mode=0o700)
+    (webconf / "brightspace" / "keepalive.ini").write_text(f"[me]\nstate = {state}\n")
+    (webconf / "brightspace" / "keepalive.ini").chmod(0o600)
+    webenv = dict(env, XDG_CONFIG_HOME=str(webconf))
+    run("whoami", extra={"XDG_CONFIG_HOME": str(webconf), "BRIGHTSPACE_SESSION": "me"},
+        has=["Ada Lovelace (alovelace)"])
+    run("whoami", extra={"XDG_CONFIG_HOME": str(webconf), "BRIGHTSPACE_SESSION": "nobody"}, ok=False,
+        has=["no session [nobody] in"])
+
+    def start_web(*args):
+        proc = subprocess.Popen([sys.executable, WEB, "--port", "0", "--no-browser", *args], env=webenv,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        first = proc.stdout.readline()
+        return proc, int(re.search(r"127\.0\.0\.1:(\d+)", first).group(1)), first
+
+    def fetch(port, host, path="/", form=None, headers=None):
+        data = urllib.parse.urlencode(form, doseq=True).encode() if form is not None else None
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, headers={"Host": host, **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def web_check(label, got, code, has=(), lacks=()):
+        global fails
+        good = got[0] == code and all(h in got[1] for h in has) and not any(x in got[1] for x in lacks)
+        print(("ok  " if good else "FAIL"), label, f"({got[0]})")
+        if not good:
+            fails += 1; print(got[1][-1500:])
+
+    proc, wport, first = start_web()
+    here = f"127.0.0.1:{wport}"
+    got = fetch(wport, here)
+    web_check("web, on one's own machine: the page, acting as the session", got, 200,
+              has=["Acting as Ada Lovelace (alovelace)", 'value="shell"', 'value="240"'])
+    token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
+    web_check("web: a request under another name is refused", fetch(wport, "evil.example"), 403, has=["not served under that name"])
+    web_check("web: a form without the page's token is refused",
+              fetch(wport, here, "/copy-quiz", {"shell": "shell", "to": "240", "action": "check"}), 403,
+              has=["Reload the page"])
+    web_check("web: a form from another site is refused",
+              fetch(wport, here, "/copy-quiz", {"token": token, "shell": "shell", "to": "240"},
+                    {"Origin": "https://evil.example"}), 403, has=["came from another site"])
+    web_check("web: a course is one of the courses file's, never an option",
+              fetch(wport, here, "/copy-quiz", {"token": token, "shell": "--help", "to": "240", "action": "check"}),
+              200, has=["Not run", "is not one of your courses"])
+    web_check("web: Check runs copy-quiz without --go and shows what it printed",
+              fetch(wport, here, "/copy-quiz", {"token": token, "shell": "shell", "to": ["240"],
+                                                "item_like": "Assignment 1", "action": "check"}), 200,
+              has=["Checked: nothing sent", "brightspace.py copy-quiz shell --to 240 --item-like=&#x27;Assignment 1&#x27;",
+                   "into 240: attached to a new grade item", "nothing sent; --go copies it"])
+    proc.terminate(); proc.wait()
+
+    # Behind Cloudflare Access: a token Access signed, checked here. An RSA key of
+    # the suite's own stands in for Access's, its public half served as Access
+    # serves it.
+    def prime(bits):
+        while True:
+            c = random.getrandbits(bits) | (1 << (bits - 1)) | 1
+            if all(c % sp for sp in (3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)):
+                d, r = c - 1, 0
+                while d % 2 == 0:
+                    d, r = d // 2, r + 1
+                for _ in range(24):
+                    x = pow(random.randrange(2, c - 1), d, c)
+                    if x in (1, c - 1):
+                        continue
+                    for _ in range(r - 1):
+                        x = pow(x, 2, c)
+                        if x == c - 1:
+                            break
+                    else:
+                        break
+                else:
+                    return c
+
+    def rsa():
+        while True:
+            p_, q_ = prime(512), prime(512)
+            phi = (p_ - 1) * (q_ - 1)
+            if phi % 65537:
+                return p_ * q_, pow(65537, -1, phi)
+
+    b64 = lambda raw: base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    (N, D), (N2, D2) = rsa(), rsa()
+
+    def jwt(claims, n=N, d=D, kid="k1"):
+        head = b64(json.dumps({"alg": "RS256", "kid": kid, "typ": "JWT"}).encode())
+        body = b64(json.dumps(claims).encode())
+        k = (n.bit_length() + 7) // 8
+        info = bytes.fromhex("3031300d060960864801650304020105000420")
+        em = b"\x00\x01" + b"\xff" * (k - 3 - len(info) - 32) + b"\x00" + info + hashlib.sha256(f"{head}.{body}".encode()).digest()
+        return f"{head}.{body}.{b64(pow(int.from_bytes(em, 'big'), d, n).to_bytes(k, 'big'))}"
+    ACCESS_KEYS["keys"] = [{"kid": "k1", "kty": "RSA", "alg": "RS256",
+                            "n": b64(N.to_bytes(128, "big")), "e": b64((65537).to_bytes(3, "big"))}]
+    webini = webconf / "web.ini"
+    webini.write_text(f"[access]\nteam = test.cloudflareaccess.com\naud = the-aud\nhost = bs.example.test\n"
+                      f"certs = http://127.0.0.1:{port}/cdn-cgi/access/certs\n\n"
+                      f"[user ada@example.edu]\nsession = me\ncourses = {COURSES}\n")
+    proc, wport, first = start_web("--access", str(webini))
+    good = {"email": "ada@example.edu", "aud": ["the-aud"], "iss": "https://test.cloudflareaccess.com",
+            "exp": int(dt.datetime.now().timestamp()) + 600}
+    asks = lambda claims=good, **kw: {"Cf-Access-Jwt-Assertion": jwt(claims, **kw)}
+    web_check("web behind Access: no token, no page", fetch(wport, "bs.example.test"), 403,
+              has=["only reached through Cloudflare Access"])
+    got = fetch(wport, "bs.example.test", headers=asks())
+    web_check("web behind Access: a token Access signed for a listed user", got, 200,
+              has=["Acting as Ada Lovelace (alovelace)", 'value="240"'])
+    token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
+    web_check("web behind Access: a token for another application", 
+              fetch(wport, "bs.example.test", headers=asks(dict(good, aud=["other"]))), 403, has=["another application"])
+    web_check("web behind Access: a token signed by a key Access does not publish",
+              fetch(wport, "bs.example.test", headers=asks(n=N2, d=D2, kid="k9")), 403, has=["not signed by a key"])
+    web_check("web behind Access: a token signed by the wrong key under the right name",
+              fetch(wport, "bs.example.test", headers=asks(n=N2, d=D2)), 403, has=["signature does not check out"])
+    web_check("web behind Access: an expired token",
+              fetch(wport, "bs.example.test", headers=asks(dict(good, exp=1))), 403, has=["expired"])
+    web_check("web behind Access: someone Access let in who is not listed",
+              fetch(wport, "bs.example.test", headers=asks(dict(good, email="bob@example.edu"))), 403,
+              has=["you signed in as bob@example.edu, who is not listed"])
+    web_check("web behind Access: under the loopback name, refused",
+              fetch(wport, f"127.0.0.1:{wport}", headers=asks()), 403, has=["not served under that name"])
+    web_check("web behind Access: Check, run as the user's own session and courses",
+              fetch(wport, "bs.example.test", "/copy-quiz",
+                    {"token": token, "shell": "shell", "to": "240", "action": "check"},
+                    {**asks(), "Origin": "https://bs.example.test"}), 200,
+              has=["Checked: nothing sent", "brightspace.py copy-quiz shell --to 240"])
+    proc.terminate(); proc.wait()
+    webini.write_text(f"[user ada@example.edu]\nsession = me\ncourses = {COURSES}\n")
+    proc, wport, first = start_web("--access", str(webini))
+    web_check("web behind Access, before web.ini names the application: everything refused",
+              fetch(wport, "bs.example.test", headers=asks()), 403, has=["does not yet say which Access application"])
+    print(("ok  " if "so everything is refused" in first else "FAIL"), "web: it says on starting that it refuses everything")
+    fails += "so everything is refused" not in first
+    proc.terminate(); proc.wait()
     # Announcements are read, not written: see brightspace.py for why.
     run("announcements", "240", has=["Class 9, Closing Journal", "2026-09-23 15:21", "Scratch", "draft"])
     run("new-folder", "240", "Assignment 5", ok=False, has=["already exists"])
