@@ -324,6 +324,21 @@ class H(BaseHTTPRequestHandler):
             return self.redirect("/d2l/lp/auth/login/loginFailed.d2l?status=1",
                                  [("Set-Cookie", "d2lSessionVal=dead; Path=/; HttpOnly"),
                                   ("Set-Cookie", "d2lSecureSessionVal=dead; Path=/; HttpOnly")])
+        if self.path == f"/d2l/api/le/1.99/{SHELL}/quizzes/":
+            if self.headers.get("X-Csrf-Token") != TOKEN["now"]:
+                return self.send(403, "CSRF token required", "text/plain")
+            body = json.loads(raw)
+            if "AttemptsAllowed" in body:
+                return self.send(400, {"title": "JSON Binding Error"})
+            made = {k: v for k, v in body.items() if k != "NumberOfAttemptsAllowed"} | {
+                "QuizId": NEXT["made"], "AttemptsAllowed": {"IsUnlimited": False,
+                                                            "NumberOfAttemptsAllowed": body.get("NumberOfAttemptsAllowed")}}
+            for key in ("Instructions", "Description", "Header", "Footer"):
+                if isinstance(body.get(key), dict):
+                    made[key] = {"Text": stored_rich(body[key]["Text"]), "IsDisplayed": body[key].get("IsDisplayed")}
+            NEXT["made"] += 1
+            SHELLS["quizzes"].append(made)
+            return self.send(200, made)
         base = f"/d2l/api/le/1.99/{OU}/"
         if self.path.startswith(base):
             if self.headers.get("X-Csrf-Token") != TOKEN["now"]:
@@ -404,8 +419,9 @@ COURSES = conf / "courses.ini"
 COURSES.write_text("# the suite's own\n\n[240]\nsite = site240\ndropbox = dropbox240\n\n"
                    f"[120]\nsite = site120\n\n[same]\nou = {OU}\n\n[login-only]\nsite = login\n\n"
                    f"[withsite]\nsite = {out / 'site'}\nou = {OU}\n\n[shell]\nou = {SHELL}\n")
+DEFAULTS = conf / "quiz-defaults.yml"
 env = dict(os.environ, BRIGHTSPACE_STATE_DIR=str(state), BRIGHTSPACE_URL=f"http://127.0.0.1:{port}",
-           BRIGHTSPACE_USER="ada", BRIGHTSPACE_COURSES=str(COURSES))
+           BRIGHTSPACE_USER="ada", BRIGHTSPACE_COURSES=str(COURSES), BRIGHTSPACE_QUIZ_DEFAULTS=str(DEFAULTS))
 fails = 0
 def run(*args, password="pw", ok=True, has=(), lacks=(), extra=None):
     global fails
@@ -1159,8 +1175,8 @@ if COOKIES_OK:
                  "checked on the server: name, start, end, attempts, time limit, IP range, password, grade item, "
                  "description"], lacks=["no grade item:"])
         made = QUIZZES_MADE[-1]
-        good = made["GradeItemId"] == ITEMS[-1]["Id"] and ITEMS[-1]["MaxPoints"] == 8.0 and made["AutoExportToGrades"]
-        fails += not good; print("   the quiz sends its scores to the new item, out of 8:", good)
+        fine = made["GradeItemId"] == ITEMS[-1]["Id"] and ITEMS[-1]["MaxPoints"] == 8.0 and made["AutoExportToGrades"]
+        fails += not fine; print("   the quiz sends its scores to the new item, out of 8:", fine)
         # Its questions go in by hand, so --check finds none until they do.
         t = run("setup-quiz", q13, "--check", ok=False, has=["DIFFERS"])
         fails += not re.search(r"\nquestions +2 +0 +DIFFERS\n", t)
@@ -1178,12 +1194,12 @@ if COOKIES_OK:
         run("new-item", "240", "Quiz 14", "--like", "Assignment 1")
         run("setup-quiz", quiz_yml("q14.yml", name="Quiz 14"), "--go",
             has=["The grade item 'Quiz 14' is already there, out of 10; the quiz goes to it",
-                 "It is not out of 8, as the file says", "created quiz 'Quiz 14'"], lacks=["created grade item"])
+                 "It is not out of 8, as the plan says", "created quiz 'Quiz 14'"], lacks=["created grade item"])
         # A quiz copied from one with no grade item needs one made first, or the file to say none.
         run("setup-quiz", quiz_yml("q15.yml", name="Quiz 15", like="Quiz 2", points=None), ok=False,
             has=["'Quiz 2' sends its scores to no grade item", "grade_item: none"])
         run("setup-quiz", quiz_yml("q15.yml", name="Quiz 15", like="Quiz 2", points=None, grade_item="none"), "--go",
-            has=["no grade item: the file says grade_item: none", "created quiz 'Quiz 15'"],
+            has=["no grade item: the plan says grade_item: none", "created quiz 'Quiz 15'"],
             lacks=["created grade item"])
         # What the block refuses, each before anything is read off Brightspace.
         for keys, why in [({"atempts": "2"}, "brightspace: has atempts, which setup-quiz does not know"),
@@ -1211,7 +1227,7 @@ if COOKIES_OK:
         here = f"127.0.0.1:{wport}"
         got = fetch(wport, here)
         web_check("web: the page has both forms", got, 200,
-                  has=['action="/setup-quiz"', 'name="yaml"', 'action="/copy-quiz"'])
+                  has=['action="/setup-quiz#', 'name="yaml"', 'action="/copy-quiz#', 'action="/make#', 'action="/defaults#'])
         token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
         text16 = pathlib.Path(quiz_yml("q16.yml", name="Quiz 16")).read_text().replace("\n", "\r\n")
         web_check("web: a quiz file without the page's token is refused",
@@ -1234,7 +1250,7 @@ if COOKIES_OK:
         web_check("web: Compare reads it back, the questions not in yet",
                   fetch(wport, here, "/setup-quiz", {"token": token, "yaml": text16, "filename": "q16.yml",
                                                      "action": "check"}), 200,
-                  has=["Not what the file says", "--check", "DIFFERS"])
+                  has=["Not what the plan says", "--check", "DIFFERS"])
         web_check("web: a file name that could be an option is not used as one",
                   fetch(wport, here, "/setup-quiz", {"token": token, "yaml": text16, "filename": "-x.yml",
                                                      "action": "plan"}), 200,
@@ -1245,6 +1261,171 @@ if COOKIES_OK:
         web_check("web: an empty box is not run",
                   fetch(wport, here, "/setup-quiz", {"token": token, "yaml": " ", "action": "plan"}), 200,
                   has=["Not run", "paste it into the box"])
+        proc.terminate(); proc.wait()
+
+        # quiz-defaults: a block per course, in the keys of a quiz's block; the
+        # lines of the keys it is given change, and no others.
+        run("quiz-defaults", has=["no defaults in"])
+        DEFAULTS.write_text("# Ours, with a comment that must stay.\n\n120:\n  # why eight\n  minutes: 8\n")
+        run("quiz-defaults", "240", "--set", "start=12:30", "--set", "end=14:00", "--set", "minutes=8",
+            "--set", "attempts=2", "--set", "points=8",
+            has=["wrote", "240's start set, end set, minutes set, attempts set, points set",
+                 "240     start", "12:30"], lacks=["120     minutes"])
+        text = DEFAULTS.read_text()
+        fine = text.startswith("# Ours, with a comment that must stay.\n\n120:\n  # why eight\n  minutes: 8\n")
+        fails += not fine; print("   the file's own lines and comments stay as they were:", fine)
+        run("quiz-defaults", "240", "--set", "description=Two **attempts**.\n\nBoth today.", "--unset", "points",
+            has=["description set", "points removed", "Two **attempts**. …"], lacks=["240     points"])
+        fails += "  description: |\n    Two **attempts**.\n\n    Both today.\n" not in DEFAULTS.read_text()
+        print("   a description is a block of its own lines:", "    Both today." in DEFAULTS.read_text())
+        for argv, why in [(["240", "--set", "start=noon"], "start: is a time of day like 14:00"),
+                          (["240", "--set", "colour=red"], "colour: is not a default"),
+                          (["240", "--set", "minutes=eight"], "minutes: is a whole number"),
+                          (["240", "--set", "sections=240 nowhere"], "unknown course 'nowhere'"),
+                          (["240", "--set", "minutes="], "--unset minutes removes it"),
+                          (["--set", "minutes=8"], "name it")]:
+            run("quiz-defaults", *argv, ok=False, has=[why], lacks=["Traceback"])
+        fails += "colour" in DEFAULTS.read_text(); print("   a refused change writes nothing:", "colour" not in DEFAULTS.read_text())
+
+        # setup-quiz with no file: the flags, and the course's defaults for the rest.
+        before = (len(QUIZZES_MADE), len(ITEMS))
+        run("setup-quiz", "--course", "240", "--name", "Quiz 10", "--date", "2026-10-20",
+            has=["Quiz 10 in 240: its questions written in Brightspace",
+                 "opens 2026-10-20 12:30, closes 2026-10-20 14:00; 8 minutes, 2 attempts",
+                 "settings copied from 'Quiz 9'; scores to a grade item 'Quiz 10'; a description",
+                 "from 240's defaults: start, end, minutes, attempts, description",
+                 '"StartDate": "2026-10-20T16:30:00.000Z"', "modelled on 'Quiz 9'",
+                 "Its questions: Quiz 10 -> Add/Edit Questions", "the same setup-quiz with --check"])
+        fails += (len(QUIZZES_MADE), len(ITEMS)) != before
+        print("   a plan from the flags sends nothing:", (len(QUIZZES_MADE), len(ITEMS)) == before)
+        run("setup-quiz", "--course", "240", "--name", "Quiz 10", "--date", "2026-10-20", "--minutes", "12",
+            "--like", "Quiz 2", "--no-grade-item", has=["12 minutes", "settings copied from 'Quiz 2'; no grade item",
+                                                        "from 240's defaults: start, end, attempts, description"])
+        run("setup-quiz", "--course", "240", "--name", "Quiz 10", "--start", "12:30", ok=False,
+            has=["start: 12:30 is a time of day, and there is no date to put it on"])
+        run("setup-quiz", "--course", "120", "--name", "Quiz 10", "--date", "2026-10-20", ok=False,
+            has=["date: 2026-10-20 needs a time to open and one to close"])
+        run("setup-quiz", "--course", "240", "--name", "Quiz 10", "--date", "2026-10-20", "--go",
+            has=["created grade item 'Quiz 10'", "modelled on 'Quiz 9'", "created quiz 'Quiz 10'"])
+        run("setup-quiz", "--course", "240", "--name", "Quiz 10", "--date", "2026-10-20", "--check",
+            has=["2026-10-20 14:00", "8 minutes"], lacks=["DIFFERS"])
+
+        # The shell: a course taught as sections has its quiz made in an empty
+        # shell, settings from the first section, and copied into each after.
+        run("quiz-defaults", "grp", "--set", "sections=240", "--set", "start=09:00", "--set", "end=10:00",
+            "--set", "attempts=2", "--set", "item_like=previous", has=["grp's sections set"])
+        run("setup-quiz", "--course", "grp", "--name", "Quiz 17", "--date", "2026-10-21", ok=False,
+            has=["grp is taught as sections (240)", "give a shell"])
+        run("quiz-defaults", "grp", "--set", "shell=shell", has=["grp's shell set"])
+        run("setup-quiz", "--course", "grp", "--name", "Quiz 17", "--date", "2026-10-21", ok=False,
+            has=["shell holds 1 quizzes ('Quiz 12')", "a shell starts empty"])
+        SHELLS["quizzes"].clear()
+        QUIZZES_MADE[[q["Name"] for q in QUIZZES_MADE].index("Quiz 16")]["CategoryId"] = 3
+        run("setup-quiz", "--course", "grp", "--name", "Quiz 17", "--date", "2026-10-21", "--points", "5",
+            ok=False, has=["a shell's quiz has none"])
+        run("setup-quiz", "--course", "grp", "--name", "Quiz 17", "--date", "2026-10-21",
+            has=["Quiz 17 made in shell, then copied into 240", "settings copied from 'Quiz 16' in 240",
+                 "no grade item in the shell", "modelled on 'Quiz 16' in 240", '"CategoryId": null',
+                 "Then by hand, in shell", "copy-quiz shell --to 240 --item-like previous --go --clear"])
+        fails += SHELLS["quizzes"] != []; print("   a plan makes nothing in the shell:", SHELLS["quizzes"] == [])
+        run("setup-quiz", "--course", "grp", "--name", "Quiz 17", "--date", "2026-10-21", "--go",
+            has=["created quiz 'Quiz 17'", "checked on the server"], lacks=["created grade item"])
+        made = SHELLS["quizzes"][-1] if SHELLS["quizzes"] else {}
+        fine = made.get("Name") == "Quiz 17" and made.get("CategoryId") is None and made.get("StartDate") == "2026-10-21T13:00:00.000Z"
+        fails += not fine; print("   the shell's quiz, its category left behind with its course:", fine)
+        run("copy-quiz", "shell", "--to", "240", "--item-like", "previous", "--go", "--clear",
+            has=["attached to a new grade item 'Quiz 17', shaped like 'Quiz 16'", "the shell is empty again"])
+        run("copy-quiz", "shell", "--to", "240", "--item-like", "previous", ok=False, has=["shell holds 0 quizzes"])
+
+        # The page over all three: made in a course or in a shell, copied, and
+        # each course's defaults, the empty fields of a quiz being its course's.
+        proc, wport, first = start_web()
+        here = f"127.0.0.1:{wport}"
+        got = fetch(wport, here)
+        token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
+        web_check("web: the make form's empty fields show the course's defaults", got, 200,
+                  has=['name="start" value="" placeholder="12:30"', 'option value="grp"', "sections 240",
+                       '<td>240</td>', "opens 12:30, closes 14:00; 8 minutes; 2 attempts; a description"],
+                  lacks=['<form method="get" action="/" class="as">'])
+        web_check("web: Check runs setup-quiz with the fields filled in, and nothing else",
+                  fetch(wport, here, "/make", {"token": token, "as": "you", "course": "240", "route": "course",
+                                               "name": "Quiz 18", "date": "2026-10-27", "start": "", "minutes": "",
+                                               "grade_item": "", "action": "plan"}), 200,
+                  has=["Checked: nothing sent", "brightspace.py setup-quiz --course 240 --name=&#x27;Quiz 18&#x27; "
+                       "--date=2026-10-27</code>", "from 240&#x27;s defaults: start, end, minutes, attempts"])
+        web_check("web: a shell that is not one of the courses is refused",
+                  fetch(wport, here, "/make", {"token": token, "course": "grp", "route": "shell", "shell": "--help",
+                                               "name": "Quiz 18", "action": "plan"}), 200,
+                  has=["Not run", "is not one of your courses"])
+        got = fetch(wport, here, "/make", {"token": token, "course": "grp", "route": "shell", "shell": "shell",
+                                           "name": "Quiz 18", "date": "2026-10-28", "grade_item": "", "action": "go"})
+        web_check("web: Make it in the shell makes it there, and readies step 2", got, 200,
+                  has=["Made", "--course grp --shell shell --name=&#x27;Quiz 18&#x27;", "created quiz &#x27;Quiz 18&#x27;",
+                       "step 2 below copies it", '<input type="checkbox" name="to" value="240" checked>',
+                       'name="item_like" value="previous"', '<input type="checkbox" name="clear" checked>'])
+        web_check("web: step 2 copies it into the sections and empties the shell",
+                  fetch(wport, here, "/copy-quiz", {"token": token, "shell": "shell", "to": "240",
+                                                    "item_like": "previous", "clear": "on", "action": "copy"}), 200,
+                  has=["Copied", "shaped like &#x27;Quiz 17&#x27;", "the shell is empty again"])
+        got = fetch(wport, here + "", "/?edit=240")
+        web_check("web: a course's defaults, to edit, as they are", got, 200,
+                  has=['name="dcourse" list="courses" value="240"', 'name="d_start" value="12:30"',
+                       'name="d_minutes" value="8"'])
+        form = {"token": token, "dcourse": "240", "d_start": "12:30", "d_end": "14:00", "d_minutes": "10",
+                "d_attempts": "", "d_description": "Two **attempts**.\r\n\r\nBoth today.", "d_shell": ""}
+        web_check("web: Save sets what changed and unsets what was emptied",
+                  fetch(wport, here, "/defaults", form), 200,
+                  has=["Saved", "quiz-defaults 240 --set=minutes=10 --unset=attempts</code>",
+                       'name="d_minutes" value="10"'])
+        left = yaml.load(DEFAULTS.read_text(), Loader=yaml.BaseLoader)["240"]
+        fails += "attempts" in left or left.get("minutes") != "10"
+        print("   the file has 240's minutes changed and its attempts gone:", "attempts" not in left and left.get("minutes") == "10")
+        web_check("web: Save with nothing changed runs nothing",
+                  fetch(wport, here, "/defaults", form | {"d_attempts": ""}), 200,
+                  has=["Not run", "nothing to change in 240"])
+        web_check("web: a defaults name that could be anything is refused",
+                  fetch(wport, here, "/defaults", {"token": token, "dcourse": "../x", "d_minutes": "8"}), 200,
+                  has=["Not run", "a course is one of your labels"])
+        web_check("web: on one's own machine there is no one else to act as",
+                  fetch(wport, here, "/make", {"token": token, "as": "other", "course": "240", "name": "Q",
+                                               "action": "plan"}), 403, has=["You may not act as other"])
+        proc.terminate(); proc.wait()
+
+        # Behind Access, whose session: each person picks among the ones web.ini gives them.
+        (webconf / "brightspace" / "keepalive.ini").write_text(f"[me]\nstate = {state}\n\n[other]\nstate = {state}\n")
+        (webconf / "brightspace" / "keepalive.ini").chmod(0o600)
+        theirs = webconf / "other-courses.ini"
+        theirs.write_text(f"[240]\nou = {OU}\n\n[shell]\nou = {SHELL}\n")
+        webini.write_text(f"[access]\nteam = test.cloudflareaccess.com\naud = the-aud\nhost = bs.example.test\n"
+                          f"certs = http://127.0.0.1:{port}/cdn-cgi/access/certs\n\n"
+                          f"[session me]\ncourses = {COURSES}\ndefaults = {DEFAULTS}\n\n"
+                          f"[session other]\ncourses = {theirs}\n\n"
+                          f"[user ada@example.edu]\nsessions = me, other\n\n[user bob@example.edu]\nsessions = other\n")
+        proc, wport, first = start_web("--access", str(webini))
+        got = fetch(wport, "bs.example.test", headers=asks())
+        web_check("web behind Access: the sessions one may act as, the first chosen", got, 200,
+                  has=['<option value="me" selected>me</option><option value="other">other</option>',
+                       'value="120"', "<td>240</td>"])
+        token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
+        web_check("web behind Access: the other session, with its own courses and its own defaults",
+                  fetch(wport, "bs.example.test", "/?as=other", headers=asks()), 200,
+                  has=['<option value="other" selected>other</option>', 'value="shell"'],
+                  lacks=['value="120"', "<td>240</td>"])
+        web_check("web behind Access: someone given one session gets no choice",
+                  fetch(wport, "bs.example.test", headers=asks(dict(good, email="bob@example.edu"))), 200,
+                  lacks=['class="as"', 'value="120"'])
+        web_check("web behind Access: a session not given is refused",
+                  fetch(wport, "bs.example.test", "/make", {"token": token, "as": "me", "course": "240",
+                                                           "name": "Q", "action": "plan"},
+                        {**asks(dict(good, email="bob@example.edu")), "Origin": "https://bs.example.test"}), 403,
+                  has=["You may not act as me"])
+        web_check("web behind Access: a Save writes the session's own defaults file",
+                  fetch(wport, "bs.example.test", "/defaults",
+                        {"token": token, "as": "other", "dcourse": "240", "d_minutes": "9"},
+                        {**asks(), "Origin": "https://bs.example.test"}), 200, has=["Saved", "--set=minutes=9"])
+        own = webini.parent / "quiz-defaults-other.yml"
+        good_file = own.exists() and "minutes: 9" in own.read_text() and "minutes: 9" not in DEFAULTS.read_text()
+        fails += not good_file; print("   it went to quiz-defaults-other.yml beside web.ini, and nowhere else:", good_file)
         proc.terminate(); proc.wait()
 
 # --- deleting: only a quiz with nothing in it --------------------------------

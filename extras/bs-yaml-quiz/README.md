@@ -135,6 +135,7 @@ brightspace:
 |---|---|
 | `course` | A label from your courses file, or an org unit id. |
 | `name` | The quiz's name, and its grade item's. |
+| `date` | The day it runs, when `start` and `end` are times of day, as `14:00`. |
 | `like` | The quiz it copies its settings from: shuffle, auto-publish, paging and the rest. The course's last quiz when left out. |
 | `start`, `end` | Local time, as `2026-10-06 12:30`; the end is its due date too. No dates when left out. |
 | `minutes` | A time limit, enforced. The copied quiz's when left out. |
@@ -143,6 +144,11 @@ brightspace:
 | `points` | What its grade item is out of, when one is made. The copied item's when left out. |
 | `grade_item` | `none` for no grade item. Left out, the quiz goes to an item of its own name, made like the one `like` sends its scores to if there is none yet. |
 | `description` | What students read before they start, in Markdown, as a question's text is. |
+| `shell` | Make it in this empty shell, to copy into the course's sections afterwards. |
+
+Whatever the block leaves out comes from the course's quiz defaults, a file of
+blocks in these same keys, and `setup-quiz` takes each key as a flag too;
+brightspace-cli's README has both.
 
 The quiz is made hidden, to be shown once its questions are in. Those go in by
 hand, from the CSV, since no API route creates a question; `setup-quiz` ends

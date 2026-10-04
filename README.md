@@ -53,6 +53,7 @@ Everything the tool keeps, and everything it reads apart from Brightspace:
 |---|---|---|
 | `~/.local/state/brightspace/` | Your session. `cookies.txt` has the two cookies; `session.json` has where they came from, the write token, the API versions, and the bearer token if `--token` gave one. Mode 0600, in a 0700 directory. | `session`, and again when a dead session is re-read from Firefox. `logout` deletes both files. |
 | `~/.config/brightspace/courses.ini` | [Your course labels](#courses). | `init`, then you. |
+| `~/.config/brightspace/quiz-defaults.yml` | [Each course's quiz defaults](#quiz-defaults). | `quiz-defaults --set`, the web page's Save, or you. |
 | `~/.config/brightspace/keepalive.ini` | [The sessions `keepalive` pings](#keeping-sessions-alive): yours, and any a colleague hands over. Only on a machine that runs the keep-alive. Mode 0600, or it is refused. | `init`, with yours, when you say this machine keeps it alive. A colleague's entry is the block their `session --export` prints. |
 | `~/.config/systemd/user/brightspace-keepalive.*` | The timer that runs `keepalive`, if you install it. | You, from `systemd/`. |
 | A Firefox profile's `sessionstore-backups/recovery.jsonlz4` | Where `session` finds the cookies. | Firefox. Only read here. |
@@ -60,9 +61,10 @@ Everything the tool keeps, and everything it reads apart from Brightspace:
 | A course's `dropbox/journals/` and `dropbox/submissions/` | Downloads: student work. | `journal`, `submissions --download`. |
 
 `$BRIGHTSPACE_STATE_DIR` names another session directory,
-`$BRIGHTSPACE_SESSION` a session by its `[name]` in the keepalive file, and
-`$BRIGHTSPACE_COURSES` another courses file; `$XDG_STATE_HOME` and
-`$XDG_CONFIG_HOME` move all three of the first files as usual. No password is
+`$BRIGHTSPACE_SESSION` a session by its `[name]` in the keepalive file,
+`$BRIGHTSPACE_COURSES` another courses file and `$BRIGHTSPACE_QUIZ_DEFAULTS`
+another defaults file; `$XDG_STATE_HOME` and `$XDG_CONFIG_HOME` move the first
+four files as usual. No password is
 ever kept. `login`, for a local D2L account, drops its password as soon as the
 request is sent.
 
@@ -352,9 +354,12 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py new-item 120 'Assignment 5' --like 'Assignment 4' --folder 'Assignment 5'
     ./brightspace.py setup 120 a6 [--go|--check]
     ./brightspace.py setup-quiz quizzes/q5-pointers/q5-pointers.yml [--go|--check]
+    ./brightspace.py setup-quiz --course 120 --name 'Quiz 6' --date 2026-10-12 [--go|--check]
+    ./brightspace.py setup-quiz --course 115 --shell 115-shell --name 'Quiz 3' --date 2026-10-12 [--go]
+    ./brightspace.py quiz-defaults 120 --set start=14:00 --set end=15:29 --set minutes=8
     ./brightspace.py set-folder 240 'Assignment 5' --show
     ./brightspace.py delete-quiz 230 Untitled --go
-    ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like 'Quiz 2' [--go] [--clear]
+    ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like previous [--go] [--clear]
 
 Each prints the exact body it is about to send, `--dry-run` stops before
 sending, and after sending **each reads its object back** and prints `checked
@@ -393,7 +398,28 @@ file and exits 1 on any difference: the questions are counted, and the CSV
 beside the file is compared with what the file makes now. Every question is
 made into the CSV before anything is sent, so a quiz whose questions would not
 import is never made. bs-yaml-quiz reads the file for it, so the two never read
-one file two ways, and that makes it the one command that needs PyYAML.
+one file two ways, and that makes it, with `quiz-defaults`, the commands that
+need PyYAML.
+
+**Every key of the block is a flag too**, which wins over the block, so a quiz
+whose questions are written in Brightspace needs no file:
+`setup-quiz --course 120 --name 'Quiz 6' --date 2026-10-12`. Whatever the two
+leave out comes from [the course's defaults](#quiz-defaults), where start and
+end are times of day and `--date` says which day. The quiz copies its settings
+from the quiz `like` names, or else from the one numbered before it, `Quiz 5`
+for `Quiz 6`, or else from the course's last quiz.
+
+**`--shell` makes it in an empty shell instead**, the first of two steps for a
+course taught as several sections, whose defaults name them. Its settings come
+from the first section's quiz numbered before it, since the shell has none;
+its quiz category stays behind, being that course's. It refuses a shell that
+holds any quiz, or has students, and makes no grade item there: each copy gets
+its section's in the second step. Between the two, its questions go into the
+shell by hand, and the run ends by printing the second step:
+
+    ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like previous --go --clear
+
+A course whose defaults name sections is never made any other way.
 
 **Brightspace keeps a description in words, not in the HTML sent.** It
 rewrites the markup (`&mdash;` comes back as the dash itself, an apostrophe as
@@ -476,7 +502,8 @@ Bare, it checks everything and prints the plan. A copy keeps the quiz's
 questions, its dates and whether it is shown, and drops its link to a grade
 item without making one. So each section's copy is attached to that section's
 grade item of the quiz's own name, or, where there is none, to a new one
-shaped like `--item-like`'s; without either it has none. It stops before
+shaped like `--item-like`'s, which `previous` makes the item of the quiz
+numbered before it; without either it has none. It stops before
 copying anything if the shell has students or holds any number of quizzes but
 one, or if a section already has a quiz of that name, and it deletes nothing:
 with `--clear`, the shell's quiz goes once every section has its copy, which
@@ -503,6 +530,51 @@ wherever a course is named. **Match its gradebook to the course's, or the
 rehearsal lies:** a sandbox that grades by *Points* drops a category's weight by
 design and reads it back `null`, so a weight that is fine in a *Weighted* course
 looks broken there.
+
+## Quiz defaults
+
+`~/.config/brightspace/quiz-defaults.yml` holds a block per course: what a quiz
+leaves out, its course's block gives, to `setup-quiz` and the web page alike.
+The keys are a quiz's `brightspace:` block's, but its course, name and date,
+with start and end as times of day:
+
+```yaml
+120:
+  start: "14:00"
+  end: "15:29"
+  minutes: 8
+  attempts: 2
+  points: 8
+
+# A course taught as one Brightspace course per section: a name of its own,
+# the sections, and the shell its quizzes are made in before they are copied.
+115:
+  sections: 115-01 115-02 115-03
+  shell: 115-shell
+  item_like: previous
+  start: "10:00"
+  end: "10:50"
+```
+
+| key | what it is |
+|---|---|
+| `like` | The quiz its settings come from; `previous`, the one numbered before it, when left out. |
+| `start`, `end` | The times it opens and closes, on the quiz's date. |
+| `minutes`, `attempts`, `ip`, `password`, `points`, `grade_item`, `description` | As in a quiz's block. |
+| `shell` | Where its quizzes are made, to be copied into the sections. |
+| `sections` | For a course taught as several: the labels of its sections, the first of which its settings come from. |
+| `item_like` | The grade item each section's copy is shaped like, where the section has none of the quiz's name; `previous` by default. |
+
+They cover what the API can set. Submission views, and the questions, stay a
+step by hand, and every run ends by naming them.
+
+    ./brightspace.py quiz-defaults                      every course's
+    ./brightspace.py quiz-defaults 120 --set minutes=10 --unset password
+
+The file is yours to edit. `--set` and `--unset` change the lines of the keys
+they are given and no others, so comments elsewhere stay; each value is checked
+first, a section or a shell must be one of your courses, and the edited file is
+read back before it replaces the old one.
 
 ## What the API does not have
 
@@ -540,20 +612,29 @@ denominator the Statistics page does not print.
 
 ## A web page
 
-`brightspace-web.py` puts `setup-quiz` and `copy-quiz` on a page, for whoever
-would rather not type them; the rest of the commands can follow. Each button
-runs the command the page shows and prints what it printed, so the page checks
-and refuses exactly what the command does. A quiz's file is chosen, or pasted
-into a box, and run in a directory of its own beside the CSV made from it, as
-bs-yaml-quiz would leave it; the page offers that CSV for download, for the
-Question Library's import.
+`brightspace-web.py` puts the quiz commands on a page, for whoever would
+rather not type them; the rest can follow. Each button runs the command the
+page shows and prints what it printed, so the page checks and refuses exactly
+what the command does. It has three parts:
+
+1. **Make a quiz**, `setup-quiz`: in its course, or in an empty shell, to be
+   copied into the course's sections afterwards. A field left empty is the
+   course's default, shown greyed in it. A quiz's YAML file can be chosen or
+   pasted instead; it is run in a directory of its own beside the CSV made from
+   it, as bs-yaml-quiz would leave it, and the page offers that CSV for the
+   Question Library's import.
+2. **Copy it into the sections**, `copy-quiz`: once the questions are in the
+   shell. Making a quiz in a shell fills this in for it.
+3. **Course defaults**, `quiz-defaults`: each course's, and a form that saves
+   one course's, with `--set` for what changed and `--unset` for what was
+   emptied.
 
     ./brightspace-web.py                      on your own machine, as you; it opens itself
     ./brightspace-web.py --access web.ini     behind Cloudflare Access, as whoever signed in
 
-**Behind Cloudflare Access** it acts as whoever Access says signed in, each
-with a session of their own from the keepalive file and a courses file of
-their own, as `web.ini` lists them:
+**Behind Cloudflare Access** it acts as one of the sessions in the keepalive
+file, each with its own courses file and quiz defaults, and each person Access
+lets in picks whose session from those `web.ini` gives them, theirs first:
 
 ```ini
 [access]
@@ -561,10 +642,23 @@ team = yourteam.cloudflareaccess.com
 aud = 4714c1a2...
 host = brightspace.example.edu
 
-[user ada@example.edu]
-session = ada
+[session ada]                  # a [name] in the keepalive file
 courses = ~/.config/brightspace/courses.ini
+defaults = ~/.config/brightspace/quiz-defaults.yml
+
+[session bob]
+courses = ~/.config/brightspace/bob-courses.ini
+
+[user ada@example.edu]
+sessions = ada, bob
+
+[user bob@example.edu]
+sessions = bob
 ```
+
+A session's `defaults` is `quiz-defaults-<name>.yml` beside `web.ini` when left
+out, so two people's never mix. A form names the session it was filled in for,
+and one not given to whoever sent it is refused.
 
 `team` and `aud` are the Access application's, and any hostname it protects
 shows both: Access sends a visitor to

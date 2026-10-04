@@ -16,6 +16,9 @@
                                                  read off assignments.yml and config/brightspace.yml
     ./brightspace.py setup-quiz q5.yml [--go|--check]  a quiz and its grade item, from the
                                                  brightspace: block in the quiz's own YAML
+    ./brightspace.py setup-quiz --course 120 --name 'Quiz 6' --date 2026-10-12
+                                                 the same from flags, the rest from the course's defaults
+    ./brightspace.py quiz-defaults [120 --set minutes=8]   each course's quiz defaults
     ./brightspace.py set-folder 240 'Assignment 5' --show
     ./brightspace.py set-quiz 120 'Quiz 3' --shuffle --auto-publish
     ./brightspace.py announcements 120
@@ -102,6 +105,8 @@ STATE = pathlib.Path(
 CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser() / "brightspace"
 COURSES_FILE = pathlib.Path(os.environ.get("BRIGHTSPACE_COURSES") or CONFIG / "courses.ini").expanduser()
 KEEPALIVE_FILE = CONFIG / "keepalive.ini"
+QUIZ_DEFAULTS_FILE = pathlib.Path(os.environ.get("BRIGHTSPACE_QUIZ_DEFAULTS")
+                                  or CONFIG / "quiz-defaults.yml").expanduser()
 # Commonwealth's. A course's site names its own host, and --base-url or
 # $BRIGHTSPACE_URL any other; this is what `session` and `courses` use before
 # there is a courses file to read one from.
@@ -2071,19 +2076,27 @@ def cmd_new_quiz(args):
         print("  then make the quiz visible.")
 
 
-def make_quiz(args, description=None, item_hint="--grade-item attaches one"):
+def make_quiz(args, description=None, item_hint="--grade-item attaches one", template=None,
+              template_from=None):
     """new-quiz's work, for setup-quiz as well: the quiz made and read back, or
     with --dry-run the payload printed. description is HTML for the quiz's own;
-    item_hint is what is said when it goes to no grade item. The quiz, or None."""
+    item_hint is what is said when it goes to no grade item; template is the
+    quiz to copy, read in the course template_from names when that is another.
+    The quiz, or None."""
     s, ou, _ = course(args)
     le, _ = s.versions()
     quizzes = list(s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/"))
     if any(q["Name"].strip().lower() == args.name.strip().lower() for q in quizzes):
         raise Failed(f"a quiz called {args.name!r} already exists")
-    template = quiz_detail(s, ou, args.like) if args.like else (quizzes[-1] if quizzes else None)
+    if template is None:
+        template = quiz_detail(s, ou, args.like) if args.like else (quizzes[-1] if quizzes else None)
     if not template:
         raise Failed("no existing quiz to copy the shape from; make the first one by hand")
     payload = dict(template)
+    if template_from:
+        # A quiz category belongs to its course, so one read elsewhere means
+        # nothing here; the grade item and the IP range are set below either way.
+        payload["CategoryId"] = None
     # QuizReadData is QuizData plus these three: the two ids, and the attempts as
     # a nested object where the input wants a flat NumberOfAttemptsAllowed. Sent
     # back as read, the whole quiz is refused as a "JSON Binding Error" --
@@ -2136,7 +2149,8 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one"):
         payload["AutoExportToGrades"] = True
     shown = dict(payload)
     print(json.dumps(shown, indent=1))
-    print(f"\n  modelled on {template['Name']!r}, with its instructions and header emptied"
+    print(f"\n  modelled on {template['Name']!r}" + (f" in {template_from}" if template_from else "")
+          + ", with its instructions and header emptied"
           + (" and its description written" if description else ""))
     if not payload["GradeItemId"]:
         print("  no grade item: " + item_hint)
@@ -2302,9 +2316,12 @@ def cmd_copy_quiz(args):
         item = next((g for g in items if same_name(g["Name"], name)), None)
         like = None
         if not item and args.item_like:
-            like = next((g for g in items if same_name(g["Name"], args.item_like)), None)
+            # previous: the item of the quiz numbered before this one, 'Quiz 2' for 'Quiz 3'.
+            want = previous_name(name) if args.item_like.strip().lower() == "previous" else args.item_like
+            like = next((g for g in items if want and same_name(g["Name"], want)), None)
             if not like:
-                raise Failed(f"{label} has no grade item {args.item_like!r} to shape {name!r}'s on")
+                raise Failed(f"{label} has no grade item {want!r} to shape {name!r}'s on" if want else
+                             f"{name!r} ends in no number, so --item-like previous names no grade item")
         plan.append((label, dest, {x["QuizId"] for x in have}, item, like))
         print(f"  into {label}: " + (f"attached to its grade item {item['Name']!r}" if item else
                                      f"attached to a new grade item {name!r}, shaped like {like['Name']!r}" if like else
@@ -2721,7 +2738,7 @@ def cmd_setup(args):
     print("\n" + setup_remainder(plan, args.course))
 
 
-# --- a quiz, from its own YAML file ----------------------------------------------
+# --- a quiz, from its own YAML file, its flags and its course's defaults -------
 #
 # A quiz written for extras/bs-yaml-quiz can say where it goes: a `brightspace:`
 # block beside its questions, with the course, the quiz's name, the quiz to copy
@@ -2731,13 +2748,42 @@ def cmd_setup(args):
 # same file. Artem, 2026-10-04: "it's good to have all in one place". It replaces
 # a setup.sh per quiz, which typed them all as flags.
 #
+# Each key is a flag too, so a quiz whose questions are written in Brightspace
+# needs no file at all, and whatever a quiz leaves out comes from its course's
+# defaults: the quiz defaults file, a block per course in the same keys, with
+# start and end as times of day. Artem, 2026-10-04: "a way to store defaults
+# for the quiz settings that we know how to set through API ... one default per
+# course". They cover what the API sets; the rest stays a step by hand, and
+# setup-quiz ends by naming it.
+#
+# A course taught as several Brightspace sections has a quiz made once, in an
+# empty shell, and copied into each: its defaults name its sections, and
+# setup-quiz --shell is the first step, copy-quiz the second. In between, the
+# questions go into the shell by hand.
+#
 # The file is bs-yaml-quiz's, and bs-yaml-quiz reads it here too, so the two can
 # never read one file two ways: its questions are made into the CSV before
 # anything is sent, and its Markdown is the description's. That makes PyYAML a
-# need of this command alone; everything else here is the standard library.
+# need of this command and of quiz-defaults; everything else here is the
+# standard library.
 
-QUIZ_KEYS = ("course", "name", "like", "start", "end", "minutes", "attempts", "ip", "password",
-             "points", "grade_item", "description")
+# A quiz's keys: its brightspace: block, and setup-quiz's flags of the same names.
+QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
+             "points", "grade_item", "description", "shell")
+# A course's defaults: a quiz's keys but the first three, start and end as times
+# of day, and two for a course taught as several sections: which they are, and
+# the grade item each section's copy is shaped like where it has none of the
+# quiz's name.
+DEFAULT_KEYS = QUIZ_KEYS[3:] + ("sections", "item_like")
+# grade_item written at all says there is none, in whichever word for nothing.
+NO_ITEM = ("none", "false", "no", "null", "~", "")
+DEFAULTS_HEADER = """\
+# Quiz defaults, a block per course: what a quiz leaves out of its brightspace:
+# block, of setup-quiz's flags or of the web page's form, its course's block
+# here gives. The keys are in brightspace-cli's README, under "Quiz defaults".
+# `brightspace.py quiz-defaults` shows them, and with --set and --unset changes
+# one course's, touching no line but those of the keys it is given.
+"""
 
 
 @functools.cache
@@ -2751,99 +2797,251 @@ def quiz_format():
     except FileNotFoundError:
         raise Failed(f"no {path}: a quiz file is read by the bs-yaml-quiz beside this tool")
     except ImportError:
-        raise Failed("a quiz file is read with PyYAML, which this Python does not have: "
-                     "`pip install pyyaml`, or on Nix python3.withPackages (ps: [ ps.pyyaml ])")
+        raise Failed("a quiz file and the quiz defaults are read with PyYAML, which this Python does not "
+                     "have: `pip install pyyaml`, or on Nix python3.withPackages (ps: [ ps.pyyaml ])")
     return mod
 
 
-def quiz_plan(path):
-    """What setup-quiz makes from a quiz's file: its brightspace: block, checked,
-    with the questions counted and the CSV beside the file compared with them."""
+def time_of_day(text):
+    """'14:00' as written, or None if it is not a time of day."""
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", text.strip())
+    return f"{int(m.group(1)):02d}:{m.group(2)}" if m and int(m.group(1)) < 24 and int(m.group(2)) < 60 else None
+
+
+def check_value(key, value, at):
+    """Refuse a value a quiz's key, or a default's, cannot take."""
+    if key in ("minutes", "attempts") and not re.fullmatch(r"[1-9]\d*", value):
+        raise Failed(f"{at} {key}: is a whole number, not {value!r}")
+    if key == "points" and not re.fullmatch(r"\d+(\.\d+)?", value):
+        raise Failed(f"{at} points: is a number, not {value!r}")
+    if key == "ip" and not re.fullmatch(r"[\d.]+\s*-\s*[\d.]+", value):
+        raise Failed(f"{at} ip: is a range like 148.137.150.0-148.137.150.255, not {value!r}")
+    if key == "grade_item" and value.strip().lower() not in NO_ITEM:
+        raise Failed(f"{at} grade_item: is none, or left out for an item of the quiz's own name")
+    if key == "date":
+        try:
+            dt.date.fromisoformat(value)
+        except ValueError:
+            raise Failed(f"{at} date: is a day like 2026-10-12, not {value!r}")
+
+
+def section_labels(value):
+    return [x for x in re.split(r"[\s,]+", value or "") if x]
+
+
+def quiz_defaults(path=None):
+    """course -> {key: value}, from the quiz defaults file; empty when there is none."""
+    path = path or QUIZ_DEFAULTS_FILE
+    if not path.exists():
+        return {}
     fmt = quiz_format()
     try:
         data = fmt.load(path.read_text(encoding="utf-8"))
-    except OSError as e:
-        raise Failed(f"{path}: {e.strerror or e}")
     except fmt.yaml.YAMLError as e:
         raise Failed(f"{path}: not YAML: {e}")
-    try:
-        csv_text = fmt.to_csv(data, str(path))
-    except fmt.Failed as e:
-        raise Failed(str(e))
-    block = data.get("brightspace")
-    if not block:
-        raise Failed(f"{path} has no brightspace: block to say which course the quiz goes in and when it runs; "
-                     "extras/bs-yaml-quiz/README.md has its keys")
-    unknown = [k for k in block if k not in QUIZ_KEYS]
-    if unknown:
-        raise Failed(f"{path}: brightspace: has {', '.join(unknown)}, which setup-quiz does not know; "
-                     f"it reads {', '.join(QUIZ_KEYS)}")
-    at = f"{path}: brightspace:"
-    plan = {k: v.strip() for k, v in block.items() if v.strip() not in fmt.NONE}
-    # Written at all, grade_item says there is none, in whichever word for nothing.
-    if "grade_item" in block and block["grade_item"].strip().lower() not in (*fmt.NONE, "none", "false", "no"):
-        raise Failed(f"{path}: brightspace: grade_item: is none, or left out for an item of the quiz's own name")
-    plan["item"] = "grade_item" not in block
-    for key in ("course", "name"):
-        if key not in plan:
-            raise Failed(f"{at} has no {key}")
-    for key in ("start", "end"):
-        if key in plan:
-            try:
-                local_to_utc(plan[key])
-            except Failed as e:
-                raise Failed(f"{at} {key}: {e}")
-    for key in ("minutes", "attempts"):
-        if key in plan and not re.fullmatch(r"[1-9]\d*", plan[key]):
-            raise Failed(f"{at} {key}: is a whole number, not {plan[key]!r}")
-    if "points" in plan and not re.fullmatch(r"\d+(\.\d+)?", plan["points"]):
-        raise Failed(f"{at} points: is a number, not {plan['points']!r}")
-    if "ip" in plan and not re.fullmatch(r"[\d.]+\s*-\s*[\d.]+", plan["ip"]):
-        raise Failed(f"{at} ip: is a range like 148.137.150.0-148.137.150.255, not {plan['ip']!r}")
-    if "points" in plan and not plan["item"]:
-        raise Failed(f"{at} points: is what its grade item is out of, and grade_item: none makes none")
-    if "description" in plan:
+    if data in (None, ""):
+        return {}
+    if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
+        raise Failed(f"{path}: each course is its label and a block of `key: value` lines under it")
+    out = {}
+    for label, keys in data.items():
+        at = f"{path}, {label}:"
+        out[label] = {}
+        for key, value in keys.items():
+            if key not in DEFAULT_KEYS:
+                raise Failed(f"{at} {key} is not a default; a course's are {', '.join(DEFAULT_KEYS)}")
+            if not isinstance(value, str):
+                raise Failed(f"{at} {key}: is text, not {value!r}")
+            if key != "grade_item" and value.strip() in fmt.NONE:
+                continue
+            check_default(key, value, at)
+            out[label][key] = value if key == "description" else value.strip()
+    return out
+
+
+def check_default(key, value, at):
+    if key in ("start", "end"):
+        if not time_of_day(value):
+            raise Failed(f"{at} {key}: is a time of day like 14:00, not {value!r}")
+    elif key == "description":
+        quiz_format().md_html(value, f"{at} description")
+    else:
+        check_value(key, value.strip(), at)
+
+
+def previous_name(name):
+    """'Quiz 2' for 'Quiz 3': the name with its number one less, or None."""
+    m = re.fullmatch(r"(.*?)(\d+)", name.strip())
+    return f"{m.group(1)}{int(m.group(2)) - 1}" if m and int(m.group(2)) > 1 else None
+
+
+def quiz_plan(path=None, flags=None, defaults_path=None):
+    """What setup-quiz makes: the quiz file's brightspace: block with the flags
+    over it and its course's defaults under it, checked, with the questions
+    counted and the CSV beside the file compared with them when there is one."""
+    flags = {k: v for k, v in (flags or {}).items() if v is not None}
+    item_flag = flags.pop("grade_item", None)
+    fmt = quiz_format()
+    data, csv_text, block = None, None, {}
+    if path:
         try:
-            plan["description_html"] = fmt.md_html(block["description"], f"{at} description")
+            data = fmt.load(path.read_text(encoding="utf-8"))
+        except OSError as e:
+            raise Failed(f"{path}: {e.strerror or e}")
+        except fmt.yaml.YAMLError as e:
+            raise Failed(f"{path}: not YAML: {e}")
+        try:
+            csv_text = fmt.to_csv(data, str(path))
         except fmt.Failed as e:
             raise Failed(str(e))
-    csv_path = path.with_suffix(".csv")
-    have = csv_path.read_bytes().decode("utf-8") if csv_path.exists() else None
-    return plan | {"path": path, "csv": csv_path, "questions": len(data["questions"]),
-                   "worth": sum(float(q.get("points", fmt.POINTS)) for q in data["questions"]),
-                   "csv_state": None if have is None else "current" if have == csv_text else "stale"}
+        block = data.get("brightspace") or {}
+        if not block and "course" not in flags:
+            raise Failed(f"{path} has no brightspace: block to say which course the quiz goes in and when "
+                         "it runs; extras/bs-yaml-quiz/README.md has its keys")
+        unknown = [k for k in block if k not in QUIZ_KEYS]
+        if unknown:
+            raise Failed(f"{path}: brightspace: has {', '.join(unknown)}, which setup-quiz does not know; "
+                         f"it reads {', '.join(QUIZ_KEYS)}")
+    at = f"{path}: brightspace:" if path else "setup-quiz"
+    given = {k: v.strip() for k, v in block.items() if k != "grade_item" and v.strip() not in fmt.NONE}
+    if "description" in given:
+        given["description"] = block["description"]
+    given |= {k: v.strip() if k != "description" else v for k, v in flags.items() if str(v).strip()}
+    for key in ("course", "name"):
+        if key not in given:
+            raise Failed(f"{at} has no {key}")
+    course_label = given["course"]
+    defaults = quiz_defaults(defaults_path).get(course_label, {})
+    plan, used = dict(given), []
+    for key in DEFAULT_KEYS[:-2]:
+        if key not in plan and key != "grade_item" and key in defaults:
+            plan[key], used = defaults[key], used + [key]
+    if item_flag is not None:
+        plan["item"] = item_flag
+    elif "grade_item" in block:
+        check_value("grade_item", block["grade_item"], at)
+        plan["item"] = False
+    elif "grade_item" in defaults:
+        plan["item"], used = False, used + ["grade_item"]
+    else:
+        plan["item"] = True
+    plan["used"] = used
+    for key in ("date", "minutes", "attempts", "points", "ip"):
+        if key in plan:
+            check_value(key, plan[key], at)
+    day = plan.get("date")
+    for key in ("start", "end"):
+        if key not in plan:
+            continue
+        clock = time_of_day(plan[key])
+        if clock:
+            if not day:
+                raise Failed(f"{at} {key}: {plan[key]} is a time of day, and there is no date to put it on")
+            plan[key] = f"{day} {clock}"
+        try:
+            local_to_utc(plan[key])
+        except Failed as e:
+            raise Failed(f"{at} {key}: {e}")
+    if day and "start" not in plan and "end" not in plan:
+        raise Failed(f"{at} date: {day} needs a time to open and one to close: start and end, "
+                     f"given or in {course_label}'s defaults")
+    if "points" in given and not plan["item"]:
+        raise Failed(f"{at} points: is what its grade item is out of, and grade_item: none makes none")
+    if "points" in given and "shell" in plan:
+        raise Failed(f"{at} points: is what its grade item is out of, and a shell's quiz has none: each "
+                     "section's copy goes to an item shaped like item_like's, in the second step")
+    sections = section_labels(defaults.get("sections"))
+    plan["sections"] = sections or [course_label]
+    plan["item_like"] = defaults.get("item_like", "previous")
+    if sections and "shell" not in plan:
+        raise Failed(f"{course_label} is taught as sections ({', '.join(sections)}), so its quiz is made in a "
+                     f"shell and copied into each: give a shell, or name one in {course_label}'s defaults")
+    # The quiz to copy the settings from is looked for where the quiz is going:
+    # the course, or, for a quiz made in a shell, the first of the sections.
+    plan["template_course"] = plan["sections"][0] if "shell" in plan else course_label
+    if "shell" in plan:
+        plan["item"] = False      # a shell's has nowhere to send scores; each copy gets its section's
+    if "description" in plan:
+        try:
+            plan["description_html"] = fmt.md_html(plan["description"], f"{at} description")
+        except fmt.Failed as e:
+            raise Failed(str(e))
+    plan |= {"path": path, "questions": None, "csv_state": None}
+    if path:
+        csv_path = path.with_suffix(".csv")
+        have = csv_path.read_bytes().decode("utf-8") if csv_path.exists() else None
+        plan |= {"csv": csv_path, "questions": len(data["questions"]),
+                 "worth": sum(float(q.get("points", fmt.POINTS)) for q in data["questions"]),
+                 "csv_state": None if have is None else "current" if have == csv_text else "stale"}
+    return plan
 
 
-def quiz_summary(plan):
-    """What a plan makes, in three lines a person reads before the payloads."""
+def quiz_summary(plan, template=None):
+    """What a plan makes, in a few lines a person reads before the payloads."""
+    def nums(key, word):
+        n = plan.get(key)
+        return f"{n} {word}{'' if n == '1' else 's'}" if n else None
+    shell = plan.get("shell")
+    where = (f"made in {shell}, then copied into {', '.join(plan['sections'])}" if shell
+             else f"in {plan['course']}")
+    has = (f"{plan['questions']} questions from {plan['path'].name}, worth {plan['worth']:g}"
+           if plan["path"] else "its questions written in Brightspace")
     when = (f"opens {plan.get('start', 'with no start date')}, closes {plan.get('end', 'with no end date')}; "
-            + (f"{plan['minutes']} minutes" if "minutes" in plan else "the time limit of the quiz it copies")
-            + f", {plan.get('attempts', '1')} attempt{'' if plan.get('attempts', '1') == '1' else 's'}")
-    copied = f"settings copied from {plan['like']!r}" if "like" in plan else "settings copied from the course's last quiz"
-    item = (f"scores to a grade item {plan['name']!r}" + (f", out of {plan['points']}" if "points" in plan else "")
-            if plan["item"] else "no grade item")
-    return (f"{plan['name']} in {plan['course']}: {plan['questions']} questions from {plan['path'].name}, "
-            f"worth {plan['worth']:g}\n  {when}\n  {copied}; {item}"
-            + ("; a description" if "description" in plan else "") + "\n")
+            + ", ".join(x for x in (nums("minutes", "minute") or "the time limit of the quiz it copies",
+                                    nums("attempts", "attempt") or "1 attempt") if x))
+    copied = f"settings copied from {template!r}" if template else (
+        f"settings copied from {plan['like']!r}" if plan.get("like") not in (None, "previous")
+        else "settings copied from the quiz numbered before it")
+    if shell:
+        copied += f" in {plan['template_course']}"
+        item = "no grade item in the shell: each copy goes to its section's"
+    elif plan["item"]:
+        item = (f"scores to a grade item {plan['name']!r}"
+                + (f", out of {plan['points']}" if "points" in plan else ""))
+    else:
+        item = "no grade item"
+    lines = [f"{plan['name']} {where}: {has}", f"  {when}",
+             f"  {copied}; {item}" + ("; a description" if "description" in plan else "")]
+    if plan["used"]:
+        lines.append(f"  from {plan['course']}'s defaults: {', '.join(plan['used'])}")
+    return "\n".join(lines) + "\n"
 
 
 def quiz_remainder(plan, template, shown):
     """What is left once setup-quiz has run, printed last so it is in front of you."""
-    yml, csv_name = shown, plan["csv"].name
-    made = {"current": "", None: f", which bs-yaml-quiz.py {yml} makes",
-            "stale": f" once bs-yaml-quiz.py {yml} has made it again: it is not what the file makes now"}
-    return "\n".join([
-        "Then by hand, since no API route does these:",
-        f" 1. Question Library -> Import -> Upload a File -> {csv_name}{made[plan['csv_state']]}.",
-        f" 2. {plan['name']} -> Add Existing -> the {plan['questions']} questions it imported.",
-        " 3. Submission views, if students are to see more after an attempt than the default:",
-        f"    none came from {template!r}, since no route reads or writes them.",
-        " 4. Make it visible to students, once it has its questions.",
-        f"Then setup-quiz {yml} --check reads it all back, the questions counted."])
+    shell = plan.get("shell")
+    if plan["path"]:
+        yml, csv_name = shown, plan["csv"].name
+        made = {"current": "", None: f", which bs-yaml-quiz.py {yml} makes",
+                "stale": f" once bs-yaml-quiz.py {yml} has made it again: it is not what the file makes now"}
+        steps = [f"Question Library -> Import -> Upload a File -> {csv_name}{made[plan['csv_state']]}.",
+                 f"{plan['name']} -> Add Existing -> the {plan['questions']} questions it imported."]
+    else:
+        steps = [f"Its questions: {plan['name']} -> Add/Edit Questions, written there or imported\n"
+                 "    into the Question Library and added with Add Existing."]
+    steps.append("Submission views, if students are to see more after an attempt than the default:\n"
+                 f"    none came from {template!r}, since no route reads or writes them.")
+    steps.append("Make it visible to students, if the copies are to be: each keeps the shell's." if shell
+                 else "Make it visible to students, once it has its questions.")
+    lines = [f"Then by hand, in {shell}, since no API route does these:" if shell
+             else "Then by hand, since no API route does these:"]
+    lines += [f" {n}. {step}" for n, step in enumerate(steps, 1)]
+    if shell:
+        lines += [f"Then copy it into {', '.join(plan['sections'])}, step 2, which empties the shell again:",
+                  f"    brightspace.py copy-quiz {shell} --to {' '.join(plan['sections'])}"
+                  f" --item-like {shell_quote(plan['item_like'])} --go --clear"]
+    else:
+        lines.append(f"Then setup-quiz {shown} --check reads it all back, the questions counted." if shown else
+                     "Then the same setup-quiz with --check reads it all back.")
+    return "\n".join(lines)
+
+
+def shell_quote(text):
+    return text if re.fullmatch(r"[\w.,:/=+-]+", text) else "'" + text.replace("'", "'\\''") + "'"
 
 
 def check_quiz(s, ou, plan):
-    """Brightspace beside the quiz's file. True when nothing differs."""
+    """Brightspace beside the quiz's file, flags and defaults. True when nothing differs."""
     rows = []
     def row(what, want, got, same=None):
         rows.append([what, want, got, "" if (want == got if same is None else same) else "DIFFERS"])
@@ -2871,7 +3069,9 @@ def check_quiz(s, ou, plan):
         if item:
             row("out of", plan.get("points", "-"), f"{item.get('MaxPoints'):g}",
                 "points" not in plan or float(plan["points"]) == item.get("MaxPoints"))
-        row("questions", str(plan["questions"]), str(len(quiz_questions(s, ou, q["QuizId"]))))
+        got = str(len(quiz_questions(s, ou, q["QuizId"])))
+        row("questions", str(plan["questions"]) if plan["questions"] is not None else "-", got,
+            plan["questions"] is None or got == str(plan["questions"]))
         if "description" in plan:
             want, got = text_pair(plan["description_html"], text_of((q.get("Description") or {}).get("Text")))
             cut = lambda t: t if len(t) <= 32 else t[:31] + "…"
@@ -2879,44 +3079,85 @@ def check_quiz(s, ou, plan):
         rows.append(["visible", "", yes_no(q.get("IsActive")), ""])
     if plan["csv_state"]:
         row(plan["csv"].name, "current", plan["csv_state"])
-    table(["", "the file says", "Brightspace has", ""], rows)
+    table(["", "the plan says", "Brightspace has", ""], rows)
     return not any(r[3] for r in rows)
 
 
-def cmd_setup_quiz(args):
-    """A quiz and its grade item, made from the brightspace: block in its file.
+def pick_template(s, ou, quizzes, plan, label):
+    """The quiz a new one copies its settings from: like, if the plan names one;
+    otherwise the one numbered before it, or failing that the last."""
+    like = plan.get("like")
+    if like and like != "previous":
+        return quiz_detail(s, ou, like)
+    before = previous_name(plan["name"])
+    hit = next((q for q in quizzes if before and same_name(q["Name"], before)), None)
+    if hit:
+        return hit
+    if like == "previous":
+        raise Failed(f"{label} has no quiz {before!r} to copy the settings from" if before else
+                     f"{plan['name']!r} ends in no number, so no quiz comes before it; name one with like")
+    if not quizzes:
+        raise Failed(f"{label} has no quiz to copy the settings from; make the first one by hand")
+    return quizzes[-1]
 
-    The file is a quiz written for extras/bs-yaml-quiz, whose README lists the
-    keys: the course, the quiz's name, the quiz to copy the settings from, the
-    dates, the timer, the attempts and a description in Markdown. The quiz goes
-    to a grade item of its own name, made like the one the copied quiz sends its
-    scores to, unless the block says grade_item: none; an item of that name
-    already there is the one it goes to. Every question is made into the CSV
-    first, so a quiz whose questions would not import is never made.
+
+def cmd_setup_quiz(args):
+    """A quiz and its grade item, made from its brightspace: block, its flags and
+    its course's defaults.
+
+    The block is in a quiz written for extras/bs-yaml-quiz, whose README lists
+    the keys; each is a flag of the same name too, which wins over the block,
+    so a quiz whose questions are written in Brightspace needs no file. Whatever
+    both leave out comes from the course's block in the quiz defaults file,
+    where start and end are times of day and --date says which day.
+
+    The quiz goes to a grade item of its own name, made like the one the quiz
+    it copies sends its scores to, unless grade_item says none; an item of that
+    name already there is the one it goes to. It copies its settings from the
+    quiz like names, or else the quiz numbered before it, or else the last.
+
+    --shell makes it in an empty shell instead, the first of two steps for a
+    course taught as several sections, whose defaults name them: its settings
+    come from the first section, the questions go into the shell by hand, and
+    copy-quiz is the second step. A course that has sections is never made any
+    other way.
 
     Without --go it prints what it would send. --check sets Brightspace beside
-    the file, the questions counted, and exits 1 on any difference. The
-    questions themselves go in by hand from the CSV, as the end of the run says:
-    no API route creates one.
+    the plan, the questions counted, and exits 1 on any difference. With a
+    file, every question is made into the CSV first, so a quiz whose questions
+    would not import is never made.
     """
     if args.go and args.check:
         raise Failed("--go or --check, not both")
-    plan = quiz_plan(pathlib.Path(args.file).expanduser())
-    args.course = plan["course"]
+    flags = {k: getattr(args, k) for k in QUIZ_KEYS if getattr(args, k, None) is not None}
+    plan = quiz_plan(pathlib.Path(args.file).expanduser() if args.file else None, flags)
+    shell = plan.get("shell")
+    target = shell or plan["course"]
+    args.course = target
     s, ou, _ = course(args)
-    print(quiz_summary(plan))
     if args.check:
+        print(quiz_summary(plan))
         if not check_quiz(s, ou, plan):
             sys.exit(1)
         return
     le, _ = s.versions()
     quizzes = list(s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/"))
-    if any(same_name(q["Name"], plan["name"]) for q in quizzes):
-        raise Failed(f"{plan['course']} already has a quiz called {plan['name']!r}; --check reads it back")
-    template = quiz_detail(s, ou, plan["like"]) if "like" in plan else (quizzes[-1] if quizzes else None)
-    if not template:
-        raise Failed(f"{plan['course']} has no quiz to copy the settings from; make the first one by hand")
-    common = dict(vars(args), name=plan["name"], dry_run=not args.go)
+    if shell:
+        people = students_in(s, ou)
+        if people:
+            raise Failed(f"{shell} has {len(people)} students, so it is a section and not a shell")
+        if quizzes:
+            raise Failed(f"{shell} holds {len(quizzes)} quizzes ({', '.join(repr(x['Name']) for x in quizzes)}): "
+                         "a shell starts empty, since copying it takes every quiz in it")
+    elif any(same_name(q["Name"], plan["name"]) for q in quizzes):
+        raise Failed(f"{target} already has a quiz called {plan['name']!r}; --check reads it back")
+    from_label = plan["template_course"]
+    from_ou = course_site(from_label).ou if from_label != target else ou
+    their = quizzes if from_ou == ou else list(s.objects(f"/d2l/api/le/{le}/{from_ou}/quizzes/"))
+    template = pick_template(s, from_ou, their, plan, from_label)
+    print(quiz_summary(plan, template["Name"]))
+    common = {"course": target, "base_url": args.base_url, "json": args.json, "name": plan["name"],
+              "dry_run": not args.go}
     attach = None
     if plan["item"]:
         items = grade_items(s, ou)
@@ -2927,26 +3168,162 @@ def cmd_setup_quiz(args):
             print(f"The grade item {have[0]['Name']!r} is already there, out of {have[0].get('MaxPoints'):g}; "
                   "the quiz goes to it.")
             if "points" in plan and float(plan["points"]) != have[0].get("MaxPoints"):
-                print(f"  It is not out of {plan['points']}, as the file says: set-item does not change "
+                print(f"  It is not out of {plan['points']}, as the plan says: set-item does not change "
                       "points, so change them in the web page.")
             print()
             attach = plan["name"]
         elif not shape:
             raise Failed(f"{template['Name']!r} sends its scores to no grade item, so there is none to shape "
-                         f"{plan['name']!r}'s like; make one with new-item first, or write grade_item: none")
+                         f"{plan['name']!r}'s like; make one with new-item first, or say grade_item: none")
         else:
             cmd_new_item(argparse.Namespace(**common, like=str(shape["Id"]), points=plan.get("points"),
                                             category=None, weight=None, folder=None))
             print()
             attach = plan["name"] if args.go else None
-    make_quiz(argparse.Namespace(**common, like=str(template["QuizId"]), start=plan.get("start"),
-                                 end=plan.get("end"), minutes=plan.get("minutes"),
-                                 attempts=plan.get("attempts", "1"), ip=plan.get("ip"),
-                                 password=plan.get("password"), grade_item=attach, active=False),
-              description=plan.get("description_html"),
-              item_hint=("the file says grade_item: none" if not plan["item"] else
+    make_quiz(argparse.Namespace(**common, like=None, start=plan.get("start"), end=plan.get("end"),
+                                 minutes=plan.get("minutes"), attempts=plan.get("attempts", "1"),
+                                 ip=plan.get("ip"), password=plan.get("password"), grade_item=attach,
+                                 active=False),
+              description=plan.get("description_html"), template=template,
+              template_from=from_label if from_ou != ou else None,
+              item_hint=("a shell's has nowhere to send scores; each copy goes to its section's" if shell else
+                         "the plan says grade_item: none" if not plan["item"] else
                          "--go attaches the one made above, which a plan cannot name"))
     print("\n" + quiz_remainder(plan, template["Name"], args.file))
+
+
+def yaml_scalar(text):
+    """One line's value as YAML writes it, read back by the BaseLoader as the
+    same text: bare where it can be, quoted where it cannot."""
+    bare = re.fullmatch(r"[A-Za-z0-9_][\w .,/()+-]*", text) and not text.endswith(" ")
+    return text if bare and text not in NO_ITEM else json.dumps(text, ensure_ascii=False)
+
+
+def default_lines(key, value, indent):
+    """A default's lines in the file: on its key's line, or a block under it."""
+    if "\n" not in value.strip("\n"):
+        return [f"{indent}{key}: {yaml_scalar(value.strip())}"]
+    body = value.strip("\n").split("\n")
+    return ([f"{indent}{key}: |" + ("2" if body[0].startswith(" ") else "")]
+            + [f"{indent}  {line}".rstrip() if line.strip() else "" for line in body])
+
+
+def edit_defaults(path, label, changes):
+    """The defaults file's text with one course's keys set (to a value) or
+    removed (None), every other line as it was, so comments elsewhere stay."""
+    lines = path.read_text(encoding="utf-8").split("\n") if path.exists() else DEFAULTS_HEADER.split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    head = next((i for i, x in enumerate(lines)
+                 if re.fullmatch(r"""(['"]?)""" + re.escape(label) + r"""\1\s*:\s*(#.*)?""", x)), None)
+    if head is None:
+        lines += ["", f"{yaml_scalar(label)}:"]
+        head = len(lines) - 1
+    end = head + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end][0] in " \t"):
+        end += 1
+    while end > head + 1 and not lines[end - 1].strip():
+        end -= 1
+    block = lines[head + 1:end]
+    keyed = [x for x in block if x.strip() and not x.lstrip().startswith("#")]
+    indent = keyed[0][:len(keyed[0]) - len(keyed[0].lstrip())] if keyed else "  "
+    for key, value in changes.items():
+        at = next((i for i, x in enumerate(block) if re.match(re.escape(indent) + re.escape(key) + r"\s*:", x)
+                   and x[len(indent)] not in " \t"), None)
+        new = [] if value is None else default_lines(key, value, indent)
+        if at is None:
+            block += new
+            continue
+        stop = at + 1
+        while stop < len(block) and (not block[stop].strip()
+                                     or len(block[stop]) - len(block[stop].lstrip()) > len(indent)):
+            stop += 1
+        while stop > at + 1 and not block[stop - 1].strip():
+            stop -= 1
+        block[at:stop] = new
+    if any(x.strip() and not x.lstrip().startswith("#") for x in block):
+        lines[head + 1:end] = block
+    else:
+        lines[head:end] = []            # nothing left: the course goes, its comments with it
+        while head > 0 and head <= len(lines) and not lines[head - 1].strip():
+            del lines[head - 1]
+            head -= 1
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def cmd_quiz_defaults(args):
+    """Each course's quiz defaults, or one course's; --set and --unset change it.
+
+    The defaults are what setup-quiz, and the web page, give a quiz that leaves
+    a key out: a block per course in the quiz defaults file, in the keys of a
+    quiz's brightspace: block, with start and end as times of day. A course
+    taught as several sections names them, and the shell its quizzes are made
+    in, so that `setup-quiz --course 115` makes it there and the page knows
+    where to copy it.
+
+    The file is YAML and yours to edit; --set changes the lines of the keys it
+    is given and no others, so comments elsewhere in it stay. Each value is
+    checked first, and the file is read back before it replaces the old one.
+    """
+    path = QUIZ_DEFAULTS_FILE
+    if not args.set and not args.unset:
+        everything = quiz_defaults()
+        shown = {args.course: everything.get(args.course, {})} if args.course else everything
+        if not any(shown.values()):
+            print(f"no defaults for {args.course} in {path}" if args.course else f"no defaults in {path}")
+            return
+        rows = [[label, key, (value.strip().split("\n")[0][:48] + (" …" if "\n" in value.strip() or
+                              len(value.strip().split("\n")[0]) > 48 else "")) if key == "description" else value]
+                for label, keys in shown.items() for key, value in keys.items()]
+        table(["course", "key", "default"], rows)
+        print(f"\n  from {path}")
+        return
+    if not args.course:
+        raise Failed("--set and --unset change one course's defaults: name it")
+    changes = {}
+    for item in args.set:
+        key, sep, value = item.partition("=")
+        key = key.strip()
+        if not sep:
+            raise Failed(f"--set {item!r}: is KEY=VALUE")
+        if key not in DEFAULT_KEYS:
+            raise Failed(f"--set {key}: is not a default; a course's are {', '.join(DEFAULT_KEYS)}")
+        at = f"--set {args.course}:"
+        if value.strip() in quiz_format().NONE and key != "grade_item":
+            raise Failed(f"--set {key}= sets nothing; --unset {key} removes it")
+        check_default(key, value, at)
+        for label in (section_labels(value) if key == "sections" else [value.strip()] if key == "shell" else []):
+            course_site(label)           # a section or a shell is a course of yours
+        changes[key] = value if key == "description" else value.strip()
+    for key in args.unset:
+        if key not in DEFAULT_KEYS:
+            raise Failed(f"--unset {key}: is not a default; a course's are {', '.join(DEFAULT_KEYS)}")
+        changes[key] = None
+    before = quiz_defaults()
+    text = edit_defaults(path, args.course, changes)
+    # Read back before it replaces anything, by the reader setup-quiz uses:
+    # this course exactly as asked, and every other as it was.
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_name(path.name + ".new")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o600)
+    try:
+        after = quiz_defaults(tmp)
+    except Failed as e:
+        tmp.unlink()
+        raise Failed(f"the edited file would not read back, so {path} is as it was: {e}")
+    want = {k: v for k, v in (before.get(args.course, {}) | changes).items() if v is not None}
+    same = lambda d: {k: v.strip("\n") if k == "description" else v for k, v in d.items()}
+    if (same(after.get(args.course, {})) != same(want)
+            or {k: v for k, v in after.items() if k != args.course}
+            != {k: v for k, v in before.items() if k != args.course}):
+        tmp.unlink()
+        raise Failed(f"the edited file would not read back as asked, so {path} is as it was")
+    os.replace(tmp, path)
+    print(f"wrote {path}: {args.course}'s "
+          + ", ".join(f"{k} {'set' if v is not None else 'removed'}" for k, v in changes.items()))
+    args.set, args.unset = [], []
+    cmd_quiz_defaults(args)
 
 
 def cmd_classlist(args):
@@ -3102,12 +3479,33 @@ def main(argv=None):
     x = with_course("announcements", cmd_announcements, help="the latest announcements, when each appears")
     x.add_argument("--last", type=int, default=10, help="how many (default 10)")
 
-    x = sub.add_parser("setup-quiz", help="a quiz and its grade item, made from the brightspace: block in its YAML",
+    x = sub.add_parser("setup-quiz", help="a quiz and its grade item, from its YAML, its flags and its course's defaults",
                        description=cmd_setup_quiz.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    x.add_argument("file", help="the quiz's .yml, as extras/bs-yaml-quiz reads it")
+    x.add_argument("file", nargs="?", help="the quiz's .yml, as extras/bs-yaml-quiz reads it; the flags do without")
+    x.add_argument("--course", help=f"a label from {COURSES_FILE}, or an org unit id")
+    x.add_argument("--name", help="the quiz's name, and its grade item's")
+    x.add_argument("--date", metavar="YYYY-MM-DD", help="the day it runs, for a start and end given as times of day")
+    x.add_argument("--start", help="'14:00' on --date, or '2026-10-12 14:00'")
+    x.add_argument("--end", help="'15:29' on --date, or '2026-10-12 15:29'")
+    x.add_argument("--minutes", help="enforced time limit; without it, the copied quiz's")
+    x.add_argument("--attempts")
+    x.add_argument("--points", help="what its grade item is out of")
+    x.add_argument("--like", help="the quiz to copy the settings from (default: the one numbered before it)")
+    x.add_argument("--ip", help="allowed range, '148.137.150.0-148.137.150.255'")
+    x.add_argument("--password")
+    x.add_argument("--grade-item", dest="grade_item", action=argparse.BooleanOptionalAction,
+                   help="a grade item of the quiz's name, or with --no-grade-item none")
+    x.add_argument("--description", help="what students read before they start, in Markdown")
+    x.add_argument("--shell", help="make it in this empty shell, to copy into the course's sections after")
     x.add_argument("--go", action="store_true", help="make them; without it, print what would be sent")
-    x.add_argument("--check", action="store_true", help="read them back and compare them with the file")
+    x.add_argument("--check", action="store_true", help="read them back and compare them with the plan")
     x.set_defaults(fn=cmd_setup_quiz)
+    x = sub.add_parser("quiz-defaults", help="each course's quiz defaults; --set and --unset change one's",
+                       description=cmd_quiz_defaults.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    x.add_argument("course", nargs="?", help="a course's label, or a name for several sections")
+    x.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="give it a default")
+    x.add_argument("--unset", action="append", default=[], metavar="KEY", help="take one away")
+    x.set_defaults(fn=cmd_quiz_defaults)
 
     x = sub.add_parser("copy-quiz", help="copy the one quiz in a shell course into each of several sections",
                        description=cmd_copy_quiz.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
