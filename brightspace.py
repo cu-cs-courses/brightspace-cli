@@ -1796,6 +1796,25 @@ def rich_input(value):
     return {"Content": value or "", "Type": "Text"}
 
 
+# SUBMISSIONRULE_T in D2L's dropbox reference: what a folder does with a second
+# submission. Assignment 4's folder, the template most folders here were copied
+# from, is 3 -- a resubmission replaces the first -- which nobody had looked at
+# until 2026-10-04, when "hand in as you go" was about to go into an exam's.
+SUBMISSIONS_RULE = {"keep-all": 2, "overwrite": 3, "one": 4}
+
+
+def rule_name(value):
+    return {v: k for k, v in SUBMISSIONS_RULE.items()}.get(value, f"unknown ({value!r})")
+
+
+def letters(rich):
+    """Only the letters and digits a reader would see, for comparing what was
+    written into rich text with what Brightspace keeps: markup, entities,
+    whitespace and bullets all fall away, and a lost paragraph does not."""
+    text = text_of(rich) if isinstance(rich, dict) else re.sub(r"<[^>]+>", "", rich or "")
+    return re.sub(r"[^0-9A-Za-z]", "", html.unescape(text))
+
+
 def link_html(url):
     """The one line an assignment folder carries: its page on the course site."""
     return {"Content": f'<p><a rel="noopener" href="{html.escape(url, quote=True)}">'
@@ -2354,6 +2373,9 @@ def cmd_new_folder(args):
     """
     s, ou, _ = course(args)
     le, _ = s.versions()
+    # setup calls this with arguments it builds itself, which carry neither.
+    instructions = getattr(args, "instructions", None)
+    submissions = getattr(args, "submissions", None)
     existing = folders(s, ou)
     if any(f.get("Name", "").strip().lower() == args.name.strip().lower() for f in existing):
         raise Failed(f"a folder called {args.name!r} already exists")
@@ -2374,7 +2396,13 @@ def cmd_new_folder(args):
     # empty that way on 2026-09-27. A link attachment, the UI's other way to carry
     # it, is read-only here: no field in the update data and no route. The
     # template's own link is never carried over.
-    payload["CustomInstructions"] = link_html(args.link) if args.link else {"Content": "", "Type": "Text"}
+    # --instructions puts a whole HTML file there instead -- an exam's problems,
+    # written where only its folder shows them -- and --link follows it if both.
+    content = open(instructions, encoding="utf-8").read() if instructions else ""
+    if args.link:
+        content += link_html(args.link)["Content"]
+    payload["CustomInstructions"] = ({"Content": content, "Type": "Html"} if content
+                                     else {"Content": "", "Type": "Text"})
     payload.pop("LinkAttachments", None)
     payload |= {
         "Name": args.name,
@@ -2382,6 +2410,8 @@ def cmd_new_folder(args):
         "Attachments": [],
         "GradeItemId": None,
     }
+    if submissions:
+        payload["SubmissionsRule"] = SUBMISSIONS_RULE[submissions]
     if args.due:
         payload["DueDate"] = local_to_utc(args.due)
     if args.open or args.due:
@@ -2411,6 +2441,7 @@ def cmd_new_folder(args):
     print(json.dumps(payload, indent=1))
     print(f"\n  modelled on {template.get('Name')!r}")
     print(f"  hidden from students: {yes_no(payload['IsHidden'])}")
+    print(f"  a second submission: {rule_name(payload.get('SubmissionsRule'))}")
     if file_types(template):
         print(f"  file types: {template.get('Name')!r} takes {file_types(template)}, which the "
               "API cannot set, so this folder takes any file -- restrict it in the web page")
@@ -2432,8 +2463,13 @@ def cmd_new_folder(args):
     if args.open:
         checks.append(("opens", payload["Availability"]["StartDate"],
                        (back.get("Availability") or {}).get("StartDate")))
-    if args.link:
+    if args.link and not instructions:
         checks.append(("link", args.link, text_of(back.get("CustomInstructions")).strip()))
+    if instructions:
+        checks.append(("instructions, letter for letter", True,
+                       letters(content) == letters(back.get("CustomInstructions"))))
+    if submissions:
+        checks.append(("a second submission", submissions, rule_name(back.get("SubmissionsRule"))))
     if payload.get("GradeItemId"):
         checks.append(("grade item", payload["GradeItemId"], back.get("GradeItemId")))
     check_landed(checks)
@@ -3023,6 +3059,10 @@ def main(argv=None):
     x.add_argument("--due", help="local time, '2026-09-29 23:59'")
     x.add_argument("--open", help="local time it becomes available, '2026-09-23 00:01'")
     x.add_argument("--link", help="the assignment page's URL, which is all the instructions carry")
+    x.add_argument("--instructions", help="an HTML file for the instructions instead; --link follows it if both")
+    x.add_argument("--submissions", choices=list(SUBMISSIONS_RULE),
+                   help="what a second submission does: keep-all, overwrite (the latest only) or one; "
+                        "the template's otherwise")
     x.add_argument("--points", help="what it is out of, if not the template's")
     x.add_argument("--grade-item", dest="grade_item", help="attach this grade item, by name or id")
     x.add_argument("--like", help="an existing folder to copy the settings from")

@@ -427,6 +427,17 @@ second copy inside Brightspace is a copy that goes stale. It refuses a name
 that already exists, so running it twice is safe, and it leaves the folder
 hidden unless you pass `--active`.
 
+Two exceptions are worth their own flags. **`--instructions FILE`** writes an
+HTML file into the instructions instead, for a folder whose text must live
+nowhere else — an exam's problems, seen only by whoever the folder is shown to;
+`--link` follows it if both are given, and the read-back compares the two
+letter for letter, so a dropped paragraph fails the run. **`--submissions`**
+sets what a second submission does: `keep-all`, `overwrite` — only the latest
+is kept — or `one`. Left out, the template's rule carries over, which is worth
+reading before "hand in as you go" goes into anything: the folder most of one
+course's were copied from overwrites, so a student who hands in two batches
+keeps only the second. The plan prints the rule either way.
+
 **`new-item` is a gradebook column**, cloned from a named item — never the
 newest, which is as likely to be the final exam — so its category, points and
 scale carry over. Inside a category the category owns the weight: sending one
