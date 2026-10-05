@@ -28,9 +28,9 @@
     ./brightspace.py logout
 
 Almost everything here reads. The commands that write are new-category,
-set-item, new-item, new-quiz, set-quiz, new-folder, set-folder, copy-quiz and
-delete-quiz, setup through new-folder and new-item, and setup-quiz through
-new-item and new-quiz. They print what they are about to send,
+set-item, new-item, new-quiz, set-quiz, new-folder, set-folder, grade,
+copy-quiz and delete-quiz, setup through new-folder and new-item, and
+setup-quiz through new-item and new-quiz. They print what they are about to send,
 --dry-run stops before sending, and each reads its object back afterwards and
 says what Brightspace kept. Nothing else changes anything.
 
@@ -1951,6 +1951,109 @@ def cmd_new_item(args):
     show_category(s, ou, cat, "after")
 
 
+# --- a grade item's values -----------------------------------------------------
+#
+# A mark for named students in one grade item: First Last as the classlist has
+# them, or their user ids. Plan by default; --go writes each and reads it back.
+# Asked for on 2026-10-05, to give each logged presenter the Presentation
+# item's full marks. The route replaces a value whole, so whatever it carries
+# beside the points -- the comment a student reads, the private one -- is read
+# first and sent back as it was.
+
+def classlist_students(s, ou):
+    le, _ = s.versions()
+    return [u for u in s.api(f"/d2l/api/le/{le}/{ou}/classlist/")
+            if re.search(r"student|learner", u.get("ClasslistRoleDisplayName") or "", re.I)]
+
+
+def student_named(students, who):
+    """The one student a name or a user id means, or a reason there is none."""
+    who = who.strip()
+    if who.isdigit():
+        hits = [u for u in students if str(u.get("Identifier")) == who]
+    else:
+        want = " ".join(who.lower().split())
+        hits = [u for u in students
+                if " ".join(f"{u.get('FirstName', '')} {u.get('LastName', '')}".lower().split()) == want
+                or " ".join((u.get("DisplayName") or "").lower().split()) == want]
+    if len(hits) == 1:
+        return hits[0], None
+    return None, "not on the classlist" if not hits else f"{len(hits)} students of that name"
+
+
+def grade_value(s, ou, item_id, user_id):
+    """A student's value in a grade item, or None where there is none yet."""
+    le, _ = s.versions()
+    try:
+        return s.api(f"/d2l/api/le/{le}/{ou}/grades/{item_id}/values/{user_id}")
+    except Failed as e:
+        if str(e).startswith("404 "):
+            return None
+        raise
+
+
+def points_of(value):
+    got = (value or {}).get("PointsNumerator")
+    return None if got is None else float(got)
+
+
+def cmd_grade(args):
+    """Give named students a mark in one grade item: its full marks, or --points.
+
+    The students are First Last as the classlist has them, or their user ids;
+    one not on the classlist, a student who withdrew say, is named and left
+    out. Without --go it prints each student's mark now and the one it would
+    set, and sends nothing; a student who already has it is left alone. --go
+    writes the rest and reads each back. The comments on a value are kept, since
+    its route replaces a value whole.
+    """
+    if args.max == (args.points is not None):
+        raise Failed("--max or --points N: the mark to give")
+    s, ou, _ = course(args)
+    le, _ = s.versions()
+    item = find_item(s, ou, args.item)
+    if item.get("GradeType") != "Numeric":
+        raise Failed(f"{item['Name']!r} is a {item.get('GradeType')} item; grade sets numeric ones only")
+    most = float(item.get("MaxPoints") or 0)
+    mark = most if args.max else float(args.points)
+    if mark < 0 or (mark > most and not item.get("CanExceedMaxPoints")):
+        raise Failed(f"{item['Name']!r} is out of {most:g}, so {mark:g} cannot go in it")
+    students = classlist_students(s, ou)
+    plan, missing, seen = [], [], set()
+    for who in args.students:
+        u, why = student_named(students, who)
+        if not u:
+            missing.append(f"{who} ({why})")
+        elif u["Identifier"] not in seen:
+            seen.add(u["Identifier"])
+            plan.append((u, grade_value(s, ou, item["Id"], u["Identifier"])))
+    print(f"{item['Name']!r} in {args.course}, out of {most:g}: {mark:g} for {len(plan)} "
+          f"student{'' if len(plan) == 1 else 's'}")
+    todo = []
+    for u, value in plan:
+        now = points_of(value)
+        name = f"{u.get('FirstName', '')} {u.get('LastName', '')}".strip()
+        print(f"  {name:28} " + (f"has {now:g} already" if now == mark else
+                                  f"{'none' if now is None else f'{now:g}'} -> {mark:g}"))
+        if now != mark:
+            todo.append((u, value, name))
+    if missing:
+        print("  not graded: " + "; ".join(missing))
+    if not args.go:
+        print(f"\n  nothing sent; --go sets the {len(todo)} that differ" if todo else "\n  nothing to change")
+        return
+    for u, value, name in todo:
+        path = f"/d2l/api/le/{le}/{ou}/grades/{item['Id']}/values/{u['Identifier']}"
+        s.send("PUT", path, {"GradeObjectType": 1, "PointsNumerator": mark,
+                             "Comments": rich_input((value or {}).get("Comments")),
+                             "PrivateComments": rich_input((value or {}).get("PrivateComments"))})
+        back = grade_value(s, ou, item["Id"], u["Identifier"])
+        check_landed([(f"{name}'s mark", mark, points_of(back)),
+                      (f"{name}'s comment", text_of((value or {}).get("Comments")),
+                       text_of((back or {}).get("Comments")))], "set")
+    print(f"\n{len(todo)} set" if todo else "\nnothing to change")
+
+
 # --- announcements ----------------------------------------------------------
 #
 # Reading only. Creating one -- how Artem posts each Journal prompt -- is refused
@@ -3462,6 +3565,13 @@ def main(argv=None):
     x.add_argument("--weight", help="its weight; only for an item outside a category, or a category weighted by hand")
     x.add_argument("--folder", help="attach it to this assignment folder, by name or id")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the payload and stop")
+    x = with_course("grade", cmd_grade, help="give named students a mark in one grade item, such as its full marks",
+                    description=cmd_grade.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    x.add_argument("item", help="the grade item's name or id")
+    x.add_argument("students", nargs="+", metavar="STUDENT", help="First Last, as on the classlist, or a user id")
+    x.add_argument("--max", action="store_true", help="the item's full marks")
+    x.add_argument("--points", help="this many points instead")
+    x.add_argument("--go", action="store_true", help="set them; without it, print the plan")
     x = with_course("set-folder", cmd_set_folder, help="show an assignment folder to students, or hide it",
                     description=cmd_set_folder.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     x.add_argument("folder", help="the folder's name (or enough of it), or its id")

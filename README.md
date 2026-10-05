@@ -358,6 +358,7 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py setup-quiz --course 115 --shell 115-shell --name 'Quiz 3' --date 2026-10-12 [--go]
     ./brightspace.py quiz-defaults 120 --set start=14:00 --set end=15:29 --set minutes=8
     ./brightspace.py set-folder 240 'Assignment 5' --show
+    ./brightspace.py grade 240 Presentation --max 'Ada Lovelace' 'Alan Turing' [--go]
     ./brightspace.py delete-quiz 230 Untitled --go
     ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like previous [--go] [--clear]
 
@@ -463,6 +464,15 @@ is kept — or `one`. Left out, the template's rule carries over, which is worth
 reading before "hand in as you go" goes into anything: the folder most of one
 course's were copied from overwrites, so a student who hands in two batches
 keeps only the second. The plan prints the rule either way.
+
+**`grade` gives named students a mark in one grade item**, its full marks
+with `--max` or a number with `--points`. A student is First Last as the
+classlist has them, or a user id; one not on the classlist is named and left
+out, and one who already has the mark is left alone, so it can be run again
+whenever the list grows. Bare, it prints each student's mark now and the one it
+would set; `--go` writes and reads each back. The route replaces a value whole,
+so the comment a student was given, and the private one, are read first and
+sent back as they were.
 
 **`new-item` is a gradebook column**, cloned from a named item — never the
 newest, which is as likely to be the final exam — so its category, points and

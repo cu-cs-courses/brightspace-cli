@@ -71,6 +71,7 @@ ITEMS = [{"Id": 500, "Name": "Assignment 1", "GradeType": "Numeric", "MaxPoints"
           "Weight": 35.0, "CategoryId": 0, "GradeSchemeUrl": "/x", "IsHidden": False,
           "AssociatedTool": {"ToolId": 2000, "ToolItemId": 7002}}]
 QUIZZES_MADE = []
+VALUES = {}   # (grade item id, user id) -> the value the API returns
 NEWS = [{"Id": 900, "Title": "Class 9, Closing Journal", "StartDate": "2026-09-23T19:21:00.000Z",
          "IsPublished": True, "Body": {"Text": "The dot", "Html": "<h2>The dot</h2>"}},
         {"Id": 901, "Title": "Scratch", "StartDate": "2026-12-31T05:01:00.000Z",
@@ -231,8 +232,13 @@ class H(BaseHTTPRequestHandler):
         if m:
             hit = [i for i in ITEMS if i["Id"] == int(m.group(1))]
             return self.send(200, hit[0]) if hit else self.send(404, {"Errors": [{"Message": "no item"}]})
-        if r == "classlist/": return self.send(200, [{"DisplayName": "Rita Solberg", "FirstName": "Rita", "LastName": "Solberg", "ClasslistRoleDisplayName": "Student", "Username": "rs", "Email": "rs@x"},
-                                                      {"DisplayName": "Ada L", "FirstName": "Ada", "LastName": "L", "ClasslistRoleDisplayName": "Instructor", "Username": "al", "Email": "al@x"}])
+        if r == "classlist/": return self.send(200, [{"Identifier": "100001", "DisplayName": "Rita Solberg", "FirstName": "Rita", "LastName": "Solberg", "ClasslistRoleDisplayName": "Student", "Username": "rs", "Email": "rs@x"},
+                                                      {"Identifier": "100002", "DisplayName": "Tomas Weber", "FirstName": "Tomas", "LastName": "Weber", "ClasslistRoleDisplayName": "Student", "Username": "tw", "Email": "tw@x"},
+                                                      {"Identifier": "77", "DisplayName": "Ada L", "FirstName": "Ada", "LastName": "L", "ClasslistRoleDisplayName": "Instructor", "Username": "al", "Email": "al@x"}])
+        m = re.fullmatch(r"grades/(\d+)/values/(\d+)", r)
+        if m:
+            got = VALUES.get((int(m.group(1)), m.group(2)))
+            return self.send(200, got) if got else self.send(404, {"Errors": [{"Message": "Not Found"}]})
         # A quiz the run itself created has no attempts and no questions yet.
         m = re.fullmatch(r"quizzes/(\d+)/(attempts|questions)/", r)
         if m and int(m.group(1)) in {x["QuizId"] for x in QUIZZES_MADE}:
@@ -284,6 +290,16 @@ class H(BaseHTTPRequestHandler):
                         "CustomInstructions": stored_rich(body.get("CustomInstructions"))}
                     return self.send(200, FOLDERS[i])
             return self.send(404, {"Errors": [{"Message": "no such folder"}]})
+        mv = re.fullmatch(r"grades/(\d+)/values/(\d+)", self.path[len(base):]) if self.path.startswith(base) else None
+        if mv:
+            # Kept as the API returns it: comments in the read shape, and a
+            # value sent in any other shape than RichTextInput dropped.
+            if body.get("GradeObjectType") != 1 or not isinstance(body.get("PointsNumerator"), (int, float)):
+                return self.send(400, {"Errors": [{"Message": "Invalid grade value"}]})
+            VALUES[(int(mv.group(1)), mv.group(2))] = {
+                "PointsNumerator": body["PointsNumerator"], "GradeObjectType": 1,
+                "Comments": stored_rich(body.get("Comments")), "PrivateComments": stored_rich(body.get("PrivateComments"))}
+            return self.send(200, "", "text/plain")
         m = re.fullmatch(r"grades/(\d+)", self.path[len(base):]) if self.path.startswith(base) else None
         if not m:
             return self.send(404, {"Errors": [{"Message": "no PUT route"}]})
@@ -1441,6 +1457,28 @@ if COOKIES_OK:
         good_file = own.exists() and "minutes: 9" in own.read_text() and "minutes: 9" not in DEFAULTS.read_text()
         fails += not good_file; print("   it went to quiz-defaults-other.yml beside web.ini, and nowhere else:", good_file)
         proc.terminate(); proc.wait()
+
+
+    # grade: named students' mark in one grade item, its full marks by default.
+    ITEMS.append({"Id": 600, "Name": "Presentation", "GradeType": "Numeric", "MaxPoints": 10.0,
+                  "Weight": 5.0, "CategoryId": 0, "GradeSchemeUrl": "/x", "IsHidden": False})
+    VALUES[(600, "100002")] = {"PointsNumerator": 8.0, "GradeObjectType": 1,
+                               "Comments": {"Text": "Clear and well paced.", "Html": "<p>Clear and well paced.</p>"},
+                               "PrivateComments": {"Text": "", "Html": ""}}
+    run("grade", "240", "Presentation", "--max", "Rita Solberg", "tomas weber", "Nobody Here",
+        has=["'Presentation' in 240, out of 10: 10 for 2 students", "Rita Solberg", "none -> 10",
+             "Tomas Weber", "8 -> 10", "not graded: Nobody Here (not on the classlist)",
+             "nothing sent; --go sets the 2 that differ"])
+    fails += VALUES.get((600, "100001")) is not None; print("   a plan sets nothing:", VALUES.get((600, "100001")) is None)
+    run("grade", "240", "Presentation", "--max", "Rita Solberg", "100002", "--go",
+        has=["checked on the server: Rita Solberg's mark, Rita Solberg's comment",
+             "checked on the server: Tomas Weber's mark, Tomas Weber's comment", "2 set"])
+    fine = VALUES[(600, "100002")]["Comments"]["Text"] == "Clear and well paced." and VALUES[(600, "100001")]["PointsNumerator"] == 10.0
+    fails += not fine; print("   the marks are in, and the comment a student had is still there:", fine)
+    run("grade", "240", "Presentation", "--max", "Rita Solberg", "--go", has=["has 10 already", "nothing to change"])
+    run("grade", "240", "Presentation", "--points", "11", "Rita Solberg", ok=False, has=["is out of 10, so 11 cannot go in it"])
+    run("grade", "240", "Presentation", "Rita Solberg", ok=False, has=["--max or --points N"])
+    run("grade", "240", "Presentation", "--max", "--points", "3", "Rita Solberg", ok=False, has=["--max or --points N"])
 
 # --- deleting: only a quiz with nothing in it --------------------------------
 if COOKIES_OK:
