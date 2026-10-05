@@ -1135,9 +1135,19 @@ if COOKIES_OK:
         has=["checked on the server: hidden, name, due, opens, closes, instructions, grade item, points"])
     run("set-folder", "240", "Assignment 8", "--hide", ok=False, has=["already hidden"])
     run("set-folder", "240", "Assignment 8", "--show", has=["yes -> no", "checked on the server"])
+    # What a second submission does, alone or beside showing and hiding.
+    run("set-folder", "240", "Assignment 8", "--submissions", "keep-all", "--dry-run",
+        has=['"SubmissionsRule": 2', "-> keep-all", "nothing sent"], lacks=["hidden from students"])
+    run("set-folder", "240", "Assignment 8", "--submissions", "keep-all",
+        has=["-> keep-all", "grade item, points, submission type, resubmissions"])
+    run("set-folder", "240", "Assignment 8", "--submissions", "keep-all", ok=False, has=["already keep-all"])
+    run("set-folder", "240", "Assignment 8", "--hide", "--submissions", "overwrite",
+        has=["hidden from students no -> yes; a second submission keep-all -> overwrite", "checked on the server"])
+    run("set-folder", "240", "Assignment 8", "--show", "--submissions", "overwrite",
+        has=["yes -> no"], lacks=["a second submission"])
     run("setup", "240", "a8", "--site", str(site.parent / "nowhere"), ok=False,
         has=["is not a course's website repo"], lacks=["Traceback"])
-    run("set-folder", "240", "Assignment 8", ok=False, has=["one of the arguments --show --hide is required"])
+    run("set-folder", "240", "Assignment 8", ok=False, has=["say what to change: --show, --hide or --submissions"])
     FOLDERS.append({"Id": 4999, "Name": "Linked", "IsHidden": True, "DueDate": None, "Availability": None,
                     "LinkAttachments": [{"LinkId": 1, "LinkName": "page", "Href": "https://example.edu/a.html"}]})
     run("set-folder", "240", "Linked", "--show", ok=False, has=["carries an attachment"])

@@ -19,7 +19,7 @@
     ./brightspace.py setup-quiz --course 120 --name 'Quiz 6' --date 2026-10-12
                                                  the same from flags, the rest from the course's defaults
     ./brightspace.py quiz-defaults [120 --set minutes=8]   each course's quiz defaults
-    ./brightspace.py set-folder 240 'Assignment 5' --show
+    ./brightspace.py set-folder 240 'Assignment 5' --show [--submissions keep-all]
     ./brightspace.py set-quiz 120 'Quiz 3' --shuffle --auto-publish
     ./brightspace.py announcements 120
     ./brightspace.py classlist 240 [--emails]
@@ -2596,7 +2596,8 @@ def cmd_new_folder(args):
 
 
 def cmd_set_folder(args):
-    """Show an assignment folder to students, or hide it, and change nothing else.
+    """Show an assignment folder to students or hide it, or change what a second
+    submission does, and change nothing else.
 
     D2L updates a folder by replacing the whole object, so the update carries
     back every setting it read, with the instructions reshaped into the form the
@@ -2605,24 +2606,37 @@ def cmd_set_folder(args):
     in the web page: both are read-only here. A folder holding either is refused
     rather than rewritten without it. Everything is read back and compared.
     """
+    submissions = getattr(args, "submissions", None)
+    if not (args.show or args.hide or submissions):
+        raise Failed("say what to change: --show, --hide or --submissions")
     s, ou, _ = course(args)
     le, _ = s.versions()
     f = find_folder(s, ou, args.folder)
     if f.get("LinkAttachments") or f.get("Attachments"):
         raise Failed(f"{f['Name']!r} carries an attachment the API cannot send back, so it is not "
-                     "rewritten here; show or hide it in the web page")
+                     "rewritten here; change it in the web page")
     if file_types(f):
         raise Failed(f"{f['Name']!r} takes {file_types(f)}, which the API cannot send back, so it "
-                     "is not rewritten here; show or hide it in the web page")
-    hidden = bool(args.hide)
-    if bool(f.get("IsHidden")) == hidden:
-        raise Failed(f"{f['Name']!r} is already {'hidden' if hidden else 'shown'}: nothing to change")
+                     "is not rewritten here; change it in the web page")
+    hidden = bool(args.hide) if args.show or args.hide else bool(f.get("IsHidden"))
+    rule = SUBMISSIONS_RULE[submissions] if submissions else f.get("SubmissionsRule")
+    changes = []
+    if hidden != bool(f.get("IsHidden")):
+        changes.append(f"hidden from students {yes_no(f.get('IsHidden'))} -> {yes_no(hidden)}")
+    if rule != f.get("SubmissionsRule"):
+        changes.append(f"a second submission {rule_name(f.get('SubmissionsRule'))} -> {rule_name(rule)}")
+    if not changes:
+        already = ([f"already {'hidden' if hidden else 'shown'}"] if args.show or args.hide else []) \
+            + ([f"already {submissions}"] if submissions else [])
+        raise Failed(f"{f['Name']!r} is {' and '.join(already)}: nothing to change")
     payload = {k: v for k, v in f.items()
                if k not in FOLDER_FACTS + FOLDER_UNWRITABLE + ("Attachments", "LinkAttachments")}
     payload["CustomInstructions"] = rich_input(f.get("CustomInstructions"))
     payload["IsHidden"] = hidden
+    if submissions:
+        payload["SubmissionsRule"] = rule
     print(json.dumps(payload, indent=1))
-    print(f"\n  {f['Name']!r}: hidden from students {yes_no(f.get('IsHidden'))} -> {yes_no(hidden)}")
+    print(f"\n  {f['Name']!r}: " + "; ".join(changes))
     if args.dry_run:
         print("  --dry-run: nothing sent")
         return
@@ -2635,10 +2649,10 @@ def cmd_set_folder(args):
             ("instructions", lambda x: text_of(x.get("CustomInstructions")).strip()),
             ("grade item", lambda x: x.get("GradeItemId")),
             ("points", lambda x: (x.get("Assessment") or {}).get("ScoreDenominator")),
-            ("submission type", lambda x: x.get("SubmissionType")),
-            ("resubmissions", lambda x: x.get("SubmissionsRule"))]
+            ("submission type", lambda x: x.get("SubmissionType"))]
     check_landed([("hidden", hidden, back.get("IsHidden"))]
-                 + [(label, get(f), get(back)) for label, get in kept], verb="updated")
+                 + [(label, get(f), get(back)) for label, get in kept]
+                 + [("resubmissions", rule, back.get("SubmissionsRule"))], verb="updated")
 
 
 # --- an assignment, from the course site's own files ------------------------
@@ -3572,12 +3586,15 @@ def main(argv=None):
     x.add_argument("--max", action="store_true", help="the item's full marks")
     x.add_argument("--points", help="this many points instead")
     x.add_argument("--go", action="store_true", help="set them; without it, print the plan")
-    x = with_course("set-folder", cmd_set_folder, help="show an assignment folder to students, or hide it",
+    x = with_course("set-folder", cmd_set_folder,
+                    help="show an assignment folder to students or hide it, or change what a second submission does",
                     description=cmd_set_folder.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     x.add_argument("folder", help="the folder's name (or enough of it), or its id")
-    way = x.add_mutually_exclusive_group(required=True)
+    way = x.add_mutually_exclusive_group()
     way.add_argument("--show", action="store_true", help="visible to students")
     way.add_argument("--hide", action="store_true", help="hidden from students")
+    x.add_argument("--submissions", choices=list(SUBMISSIONS_RULE),
+                   help="what a second submission does: keep-all, overwrite (the latest only) or one")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the payload and stop")
     x = with_course("setup", cmd_setup, help="an assignment's folder and grade item, read off the course site's files",
                     description=cmd_setup.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

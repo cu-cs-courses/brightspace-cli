@@ -357,7 +357,7 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py setup-quiz --course 120 --name 'Quiz 6' --date 2026-10-12 [--go|--check]
     ./brightspace.py setup-quiz --course 115 --shell 115-shell --name 'Quiz 3' --date 2026-10-12 [--go]
     ./brightspace.py quiz-defaults 120 --set start=14:00 --set end=15:29 --set minutes=8
-    ./brightspace.py set-folder 240 'Assignment 5' --show
+    ./brightspace.py set-folder 240 'Assignment 5' --show [--submissions keep-all]
     ./brightspace.py grade 240 Presentation --max 'Ada Lovelace' 'Alan Turing' [--go]
     ./brightspace.py delete-quiz 230 Untitled --go
     ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like previous [--go] [--clear]
@@ -484,8 +484,11 @@ folder **from the item's side**, which is the one way to link the two without
 rewriting the folder: a folder update replaces the whole object, and it cannot
 send back a link attachment the folder may carry.
 
-**`set-folder` shows a folder to students or hides it, and changes nothing
-else.** It sends back every setting it read, with the instructions reshaped
+**`set-folder` shows a folder to students or hides it, or sets what a second
+submission does, and changes nothing else.** `--submissions keep-all` keeps
+every submission, `overwrite` only the latest, and `one` refuses a second; a
+folder that overwrites is a trap whenever students hand in as they go, since
+each file replaces the last. It sends back every setting it read, with the instructions reshaped
 into the form the API accepts. A link or a file attached in the web page cannot
 be sent back, so a folder holding either is refused; change that one in the
 web page.
