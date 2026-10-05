@@ -1345,6 +1345,7 @@ if COOKIES_OK:
         token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
         web_check("web: the make form's empty fields show the course's defaults", got, 200,
                   has=['name="start" value="" placeholder="12:30"', 'option value="grp"', "sections 240",
+                       '<p class="hint" id="gist">240&#x27;s defaults: opens 12:30, closes 14:00; 8 minutes',
                        '<td>240</td>', "opens 12:30, closes 14:00; 8 minutes; 2 attempts; a description"],
                   lacks=['<form method="get" action="/" class="as">'])
         web_check("web: Check runs setup-quiz with the fields filled in, and nothing else",
@@ -1369,10 +1370,23 @@ if COOKIES_OK:
                   has=["Copied", "shaped like &#x27;Quiz 17&#x27;", "the shell is empty again"])
         got = fetch(wport, here + "", "/?edit=240")
         web_check("web: a course's defaults, to edit, as they are", got, 200,
-                  has=['name="dcourse" list="courses" value="240"', 'name="d_start" value="12:30"',
+                  has=['id="dcourse" list="courses" value="240"', 'name="d_start" value="12:30"',
                        'name="d_minutes" value="8"'])
-        form = {"token": token, "dcourse": "240", "d_start": "12:30", "d_end": "14:00", "d_minutes": "10",
-                "d_attempts": "", "d_description": "Two **attempts**.\r\n\r\nBoth today.", "d_shell": ""}
+        before = DEFAULTS.read_text()
+        got = fetch(wport, here, "/defaults", {"token": token, "dcourse": "240", "action": "save", "d_start": "",
+                                               "d_minutes": "", "d_attempts": ""})
+        web_check("web: Save on a form that never held the course's defaults clears nothing, and loads them",
+                  got, 200, has=["Not run", "did not hold 240&#x27;s saved defaults", 'name="d_start" value="12:30"',
+                                 'name="d_loaded" value="240"'])
+        fails += DEFAULTS.read_text() != before
+        print("   the file is as it was:", DEFAULTS.read_text() == before)
+        web_check("web: Load fills the form with a course's saved defaults, and runs nothing",
+                  fetch(wport, here, "/defaults", {"token": token, "dcourse": "240", "action": "load"}), 200,
+                  has=['name="d_start" value="12:30"', 'name="d_minutes" value="8"', 'name="d_loaded" value="240"'],
+                  lacks=["Saved", "Not run"])
+        form = {"token": token, "dcourse": "240", "d_loaded": "240", "action": "save", "d_start": "12:30",
+                "d_end": "14:00", "d_minutes": "10", "d_attempts": "",
+                "d_description": "Two **attempts**.\r\n\r\nBoth today.", "d_shell": ""}
         web_check("web: Save sets what changed and unsets what was emptied",
                   fetch(wport, here, "/defaults", form), 200,
                   has=["Saved", "quiz-defaults 240 --set=minutes=10 --unset=attempts</code>",

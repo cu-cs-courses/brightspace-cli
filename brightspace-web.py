@@ -210,6 +210,7 @@ main { max-width: 48rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
 h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
 .as { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: 0 0 .25rem; }
 .as select { width: auto; }
+.row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0 .6rem; }
 .who { color: var(--muted); margin: 0 0 1.5rem; }
 fieldset { border: 1px solid var(--line); border-radius: 8px; background: var(--box);
            margin: 0 0 1rem; padding: .75rem 1rem 1rem; min-width: 0; }
@@ -246,12 +247,16 @@ td:last-child { text-align: right; white-space: nowrap; }
 a { color: var(--accent); }
 </style>"""
 
-# Fills each field's greyed default from the chosen course's, and keeps a
-# course taught as sections to the shell; and reads a chosen file into the box.
+# Fills each field's greyed default from the chosen course's, says them in a
+# line under the course, and keeps a course taught as sections to the shell;
+# loads a course's saved defaults into their form when it is chosen there; and
+# reads a chosen file into the box.
 SCRIPT = """<script>
 var DEFAULTS = JSON.parse(document.getElementById("defaults").textContent);
+var GISTS = JSON.parse(document.getElementById("gists").textContent);
 function course_changed() {
   var form = document.getElementById("make"), d = DEFAULTS[form.course.value] || {};
+  document.getElementById("gist").textContent = GISTS[form.course.value] || "";
   form.querySelectorAll("[data-default]").forEach(function (el) {
     var key = el.dataset.default, said = d[key];
     el.placeholder = said !== undefined ? said : (el.dataset.none || "");
@@ -266,6 +271,21 @@ function course_changed() {
 document.getElementById("make").course.addEventListener("change", course_changed);
 document.getElementById("make").shell.addEventListener("change", function () { this.form.dataset.touched = "1"; });
 course_changed();
+// The defaults form holds one course's saved defaults at a time, and says
+// which in d_loaded, so that Save changes them rather than clearing them.
+document.getElementById("dcourse").addEventListener("change", function () {
+  var form = this.form, d = DEFAULTS[this.value.trim()] || {};
+  form.querySelectorAll("input[type=text][name^=d_], textarea[name^=d_]").forEach(function (el) {
+    el.value = d[el.name.slice(2)] || "";
+  });
+  form.d_grade_item.value = "grade_item" in d ? "none" : "";
+  form.d_shell.value = d.shell || "";
+  var sections = (d.sections || "").split(/[\\s,]+/);
+  form.querySelectorAll("input[name=d_sections]").forEach(function (box) {
+    box.checked = sections.indexOf(box.value) >= 0;
+  });
+  form.d_loaded.value = this.value.trim();
+});
 document.getElementById("pick").addEventListener("change", function () {
   var file = this.files[0], form = this.form;
   if (file) file.text().then(function (text) { form.yaml.value = text; form.filename.value = file.name; });
@@ -364,7 +384,7 @@ def gist(keys):
     return "; ".join(bits) or "nothing yet"
 
 
-def page(profiles, profile, form=None, slots=None, edit=None, copy=None):
+def page(profiles, profile, form=None, slots=None, edit=None, copy=None, fresh=False):
     form, slots, copy = form or {}, slots or {}, copy or {}
     esc = html.escape
     who, rows = known(profile)
@@ -377,6 +397,10 @@ def page(profiles, profile, form=None, slots=None, edit=None, copy=None):
     course = form.get("course") if form.get("course") in dict(courses) else (courses[0][0] if courses else "")
     mine = defaults.get(course, {})
     route = form.get("route") or ("shell" if mine.get("sections") or mine.get("shell") else "course")
+    gists = {c: (f"{c}'s defaults: {gist(defaults[c])}. A field left empty below takes its default, "
+                 "shown greyed in it." if defaults.get(c) else
+                 f"{c} has no defaults yet, so a field left empty below sets nothing; step 3 gives it some.")
+             for c, _ in courses}
     shell = form.get("shell") or mine.get("shell", "")
     hidden = (f'<input type="hidden" name="token" value="{TOKEN}">'
               f'<input type="hidden" name="as" value="{esc(profile["name"])}">')
@@ -405,6 +429,7 @@ def page(profiles, profile, form=None, slots=None, edit=None, copy=None):
     out.append(f'<form method="post" action="/make#make-it" id="make" data-touched="{"1" if form.get("shell") else ""}">'
                + hidden + '<fieldset><legend>Where</legend>'
                f'<label>Course<select name="course">{options(courses, course)}</select></label>'
+               f'<p class="hint" id="gist">{esc(gists.get(course, ""))}</p>'
                f'<label><input type="radio" name="route" value="course"{" checked" if route == "course" else ""}>'
                "In the course itself</label>"
                f'<label><input type="radio" name="route" value="shell"{" checked" if route == "shell" else ""}>'
@@ -479,14 +504,26 @@ def page(profiles, profile, form=None, slots=None, edit=None, copy=None):
             f'<tr><td>{esc(c)}</td><td>{esc(gist(keys))}</td><td><a href="/?as={urllib.parse.quote(profile["name"])}'
             f'&amp;edit={urllib.parse.quote(c)}#defaults-of">edit</a></td></tr>' for c, keys in defaults.items())
             + "</table>")
+    # The defaults form holds one course's saved defaults, or what was just
+    # typed into it; d_loaded says which course's saved ones it started from.
     edit = edit if edit is not None else (form.get("dcourse") or "")
     now = dict(defaults.get(edit, {}))
-    values = {k: form[f"d_{k}"] for k in (k for k, _, _ in DEFAULT_FIELDS) if f"d_{k}" in form} or now
+    typed = not fresh and any(k.startswith("d_") and k != "d_loaded" for k in form)
+    values = {k[2:]: v for k, v in form.items() if k.startswith("d_")} if typed else now
+    if typed:
+        values["sections"] = " ".join(form.get("d_sections", []))
+        if form.get("d_grade_item") != "none":
+            values.pop("grade_item", None)
+    loaded = form.get("d_loaded", "") if typed else edit
     out.append('<form method="post" action="/defaults#defaults-of">' + hidden
                + "<fieldset><legend>A course's defaults</legend>"
                '<p class="hint">A course of yours, or a new name such as <code>115</code> for a course taught '
                "as several sections, which then names them below.</p>"
-               f'<label>Course<input type="text" name="dcourse" list="courses" value="{esc(edit)}" required></label>'
+               f'<input type="hidden" name="d_loaded" value="{esc(loaded)}">'
+               '<div class="row"><label for="dcourse">Course</label>'
+               f'<input type="text" name="dcourse" id="dcourse" list="courses" value="{esc(edit)}" required'
+               ' style="width: auto; flex: 1">'
+               '<button name="action" value="load">Load its saved defaults</button></div>'
                '<datalist id="courses">' + "".join(f'<option value="{esc(c)}">' for c in dict.fromkeys(
                    labels + list(defaults))) + '</datalist><div class="grid">')
     for key, label, none in DEFAULT_FIELDS:
@@ -505,10 +542,12 @@ def page(profiles, profile, form=None, slots=None, edit=None, copy=None):
                + "".join(f'<label><input type="checkbox" name="d_sections" value="{esc(x)}"'
                          f'{" checked" if x in B.section_labels(values.get("sections", "")) else ""}>{esc(named[x])}</label>'
                          for x in labels)
-               + '</fieldset><div class="buttons"><button class="go">Save</button></div></form>')
+               + '</fieldset><div class="buttons"><button name="action" value="save" class="go">Save</button>'
+               "</div></form>")
     out.append(slots.get("saved", ""))
     out.append('</main><script type="application/json" id="defaults">'
-               + json.dumps(defaults).replace("</", "<\\/") + "</script>" + SCRIPT + "</body></html>")
+               + json.dumps(defaults).replace("</", "<\\/") + '</script><script type="application/json" id="gists">'
+               + json.dumps(gists).replace("</", "<\\/") + "</script>" + SCRIPT + "</body></html>")
     return "\n".join(out)
 
 
@@ -569,6 +608,10 @@ def run_copy(form, profile):
     return command(argv, profile)
 
 
+class NotLoaded(ValueError):
+    """A defaults form sent for a course whose saved defaults it never held."""
+
+
 def run_defaults(form, profile):
     """quiz-defaults for the defaults form: a --set for each field changed, an
     --unset for each emptied."""
@@ -576,6 +619,9 @@ def run_defaults(form, profile):
     if not re.fullmatch(r"[\w.-]+", course):
         raise ValueError("a course is one of your labels, or a name like 115 for one taught as several sections")
     now = defaults_of(profile)[0].get(course, {})
+    if now and form.get("d_loaded", "") != course:
+        raise NotLoaded(f"The form did not hold {course}'s saved defaults, so saving it would have cleared "
+                        "them. They are in it now: change what you want and Save again.")
     asked = {k: form.get(f"d_{k}", "").replace("\r\n", "\n") for k, _, _ in DEFAULT_FIELDS}
     asked |= {"description": form.get("d_description", "").replace("\r\n", "\n"),
               "shell": form.get("d_shell", ""), "sections": " ".join(form.get("d_sections", [])),
@@ -711,13 +757,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif where == "/copy-quiz":
                 line, code, output = run_copy(form, profile)
                 form["from"] = form.get("shell", "")
+            elif action == "load":
+                return self.reply(200, page(profiles, profile, form, edit=form.get("dcourse", "").strip(),
+                                            fresh=True))
             else:
                 line, code, output = run_defaults(form, profile)
                 edit = form.get("dcourse", "").strip()
         except ValueError as e:
             note = f'<section class="result"><h2 class="bad">Not run</h2><p>{html.escape(str(e))}</p></section>'
             return self.reply(200, page(profiles, profile, form, {slot: note},
-                                        edit=form.get("dcourse") if where == "/defaults" else None))
+                                        edit=form.get("dcourse", "").strip() if where == "/defaults" else None,
+                                        fresh=isinstance(e, NotLoaded)))
         except subprocess.TimeoutExpired:
             note = ('<section class="result"><h2 class="bad">Still running after half an hour</h2>'
                     "<p>Look in Brightspace before trying again.</p></section>")
@@ -744,7 +794,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             extra += ("<p>Next, in the shell, its questions; then step 2 below copies it into the sections, "
                       "ready as it is.</p>")
         self.reply(200, page(profiles, profile, form, {slot: result(verdict, code == 0, line, output, extra)},
-                             edit=edit, copy=copy))
+                             edit=edit, copy=copy, fresh=where == "/defaults" and not code))
 
 
 def main(argv=None):
