@@ -2171,12 +2171,12 @@ def cmd_new_quiz(args):
     """A quiz, shaped like one that already works in this course.
 
     Its questions cannot come this way: the API has no route that creates one, so
-    the Written Response question that takes the files is added by hand afterwards.
+    they are imported or written by hand afterwards.
     """
     if make_quiz(args):
         print("Left to do by hand, because no API route creates a question:")
-        print("  one Written Response question, 'Enable inserted images and attachments' ticked,")
-        print("  then make the quiz visible.")
+        print("  its questions -- imported from a CSV, or one Written Response question with")
+        print("  'Enable inserted images and attachments' ticked for files -- then make it visible.")
 
 
 def make_quiz(args, description=None, item_hint="--grade-item attaches one", template=None,
