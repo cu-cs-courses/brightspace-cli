@@ -2175,7 +2175,18 @@ def cmd_new_quiz(args):
     Its questions cannot come this way: the API has no route that creates one, so
     they are imported or written by hand afterwards.
     """
-    if make_quiz(args):
+    template = template_from = None
+    if getattr(args, "like_from", None):
+        # The shape from a quiz in another course: a sandbox has nothing to copy
+        # and the tool will not invent a quiz, so the live course's is read
+        # instead. Its category, grade item and IP range belong to that course
+        # and are dropped by make_quiz.
+        if not args.like:
+            raise Failed("--like-from needs --like, the quiz to copy there")
+        c_from = course_site(args.like_from)
+        template = quiz_detail(open_session(args, c_from.host), c_from.ou, args.like)
+        template_from = args.like_from
+    if make_quiz(args, template=template, template_from=template_from):
         print("Left to do by hand, because no API route creates a question:")
         print("  its questions -- imported from a CSV, or one Written Response question with")
         print("  'Enable inserted images and attachments' ticked for files -- then make it visible.")
@@ -3548,6 +3559,8 @@ def main(argv=None):
     x.add_argument("--ip", help="allowed range, '148.137.150.0-148.137.150.255'")
     x.add_argument("--password")
     x.add_argument("--like", help="an existing quiz to copy the settings from")
+    x.add_argument("--like-from", dest="like_from", metavar="COURSE",
+                   help="read --like's quiz in this course instead: 230, for a sandbox with no quiz of its own")
     x.add_argument("--grade-item", dest="grade_item", help="attach this grade item, by name or id")
     x.add_argument("--active", action="store_true", help="visible to students immediately")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the payload and stop")
