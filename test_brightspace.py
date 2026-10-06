@@ -813,6 +813,8 @@ if COOKIES_OK:
         has=["attached to 7002", "'Midterm' -> 'Midterm Part 1'", "CategoryId: 0 -> 99",
              "now 'Midterm Part 1', category 99"])
     run("set-item", "240", "Midterm Part 1", ok=False, has=["nothing to change"])
+    run("set-item", "240", "Midterm Part 1", "--points", "9",
+        has=["MaxPoints:", "-> 9.0", "checked on the server: maxpoints, still attached to"])
     run("set-item", "240", "nope", ok=False, has=["no grade items match"])
     t = run("new-quiz", "240", "Midterm Part 1", "--start", "2026-09-29 12:30",
             "--end", "2026-09-29 13:25", "--minutes", "50", "--attempts", "1",

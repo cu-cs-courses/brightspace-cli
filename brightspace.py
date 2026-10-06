@@ -1712,7 +1712,7 @@ def item_payload(full, changed):
 
 
 def cmd_set_item(args):
-    """Rename a grade item, move it into a category, or change its weight.
+    """Rename a grade item, move it into a category, change its weight, or what it is out of.
 
     The route replaces the whole object, so this reads it first and sends it back
     with only the named fields changed -- including the tool it is attached to,
@@ -1729,8 +1729,10 @@ def cmd_set_item(args):
         changed["CategoryId"] = find_category(s, ou, args.category)["Id"]
     if args.weight is not None:
         changed["Weight"] = float(args.weight)
+    if getattr(args, "points", None) is not None:
+        changed["MaxPoints"] = float(args.points)
     if not changed:
-        raise Failed("nothing to change: pass --name, --category or --weight")
+        raise Failed("nothing to change: pass --name, --category, --weight or --points")
     payload = item_payload(full, changed)
     tool = full.get("AssociatedTool") or {}
     print(f"{full['Name']!r} (id {full['Id']}), attached to "
@@ -3529,11 +3531,13 @@ def main(argv=None):
     x.add_argument("--weight", required=True, help="its share of the final grade")
     x.add_argument("--max-points", default=10, dest="max_points")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the payload and stop")
-    x = with_course("set-item", cmd_set_item, help="rename a grade item, move it, or reweight it")
+    x = with_course("set-item", cmd_set_item,
+                    help="rename a grade item, move it, reweight it, or change what it is out of")
     x.add_argument("item", help="the item's name or id")
     x.add_argument("--name", help="rename it")
     x.add_argument("--category", help="move it into this category, by name or id")
     x.add_argument("--weight")
+    x.add_argument("--points", help="what it is out of: a quiz that grows a question grows its column")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the payload and stop")
     x = with_course("new-quiz", cmd_new_quiz, help="create a quiz; its question is added by hand after")
     x.add_argument("name")

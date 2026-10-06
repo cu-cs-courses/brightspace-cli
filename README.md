@@ -344,6 +344,7 @@ can be checked the morning of the exam in one command rather than five tabs.
 
     ./brightspace.py new-category 240 Midterm --weight 35
     ./brightspace.py set-item 240 Midterm --name 'Midterm Part 1' --category Midterm
+    ./brightspace.py set-item 240 'Quiz 5' --points 9
     ./brightspace.py new-quiz 240 'Midterm Part 1' --start '2026-09-29 12:30' \
         --end '2026-09-29 13:25' --minutes 50 --attempts 1 \
         --ip 148.137.150.0-148.137.150.255
