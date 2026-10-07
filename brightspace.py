@@ -22,6 +22,9 @@
     ./brightspace.py set-folder 240 'Assignment 5' --show [--submissions keep-all]
     ./brightspace.py set-quiz 120 'Quiz 3' --shuffle --auto-publish
     ./brightspace.py announcements 120
+    ./brightspace.py checklists 115-01 ['Week 7']  the checklists, or one's items as new-checklist takes them
+    ./brightspace.py new-checklist 115-01 115-02 --name 'Week 7' --item 'Read chapter 3' --due ... [--go]
+                                                 one checklist, the same in several courses at once
     ./brightspace.py classlist 240 [--emails]
     ./brightspace.py ping                        keeps the session alive; run it from a timer
     ./brightspace.py keepalive                   pings every session in ~/.config/brightspace/keepalive.ini
@@ -29,8 +32,8 @@
 
 Almost everything here reads. The commands that write are new-category,
 set-item, new-item, new-quiz, set-quiz, new-folder, set-folder, grade,
-copy-quiz and delete-quiz, setup through new-folder and new-item, and
-setup-quiz through new-item and new-quiz. They print what they are about to send,
+copy-quiz, delete-quiz and new-checklist, setup through new-folder and
+new-item, and setup-quiz through new-item and new-quiz. They print what they are about to send,
 --dry-run stops before sending, and each reads its object back afterwards and
 says what Brightspace kept. Nothing else changes anything.
 
@@ -83,6 +86,7 @@ import datetime as dt
 import functools
 import getpass
 import html
+import html.parser
 import http.client
 import http.cookiejar
 import importlib.util
@@ -3475,6 +3479,349 @@ def cmd_classlist(args):
     emit(args, rows, ["name", "role", "username"] + (["email"] if args.emails else []), users)
 
 
+# --- checklists -----------------------------------------------------------
+#
+# A checklist is a name, a description and items, and every item sits in a
+# category: the API refuses an item with no category, as it refuses a
+# checklist with no description. So a checklist made here has one category, of
+# its own name, holding the items in the order given. A name is plain text of
+# at most 512 characters, a checklist's and an item's alike, and a description
+# is rich text, which Brightspace rewrites on the way in -- a link gains
+# rel="noopener", &mdash; becomes the dash -- so it is read back by its words.
+# Measured on a sandbox, 2026-10-07. Nothing in the API reads which items a
+# student has ticked.
+
+NAME_MAX = 512
+NO_TEXT = {"Content": "", "Type": "Text"}
+
+
+def checklists_of(s, ou):
+    return list(s.objects(f"/d2l/api/le/{s.versions()[0]}/{ou}/checklists/"))
+
+
+def checklist_items(s, ou, cid):
+    """A checklist's items in the order students see them: by category, then
+    each in its own place."""
+    base = f"/d2l/api/le/{s.versions()[0]}/{ou}/checklists/{cid}/"
+    rank = {c["CategoryId"]: c.get("SortOrder") or 0 for c in s.objects(base + "categories/")}
+    return sorted(s.objects(base + "items/"),
+                  key=lambda i: (rank.get(i.get("CategoryId"), 0), i.get("SortOrder") or 0, i["ChecklistItemId"]))
+
+
+def find_checklist(s, ou, want):
+    have = checklists_of(s, ou)
+    if want.isdigit():
+        hits = [c for c in have if c["ChecklistId"] == int(want)]
+    else:
+        hits = [c for c in have if same_name(c["Name"], want)] or [
+            c for c in have if want.strip().lower() in c["Name"].lower()]
+    if len(hits) == 1:
+        return hits[0]
+    names = ", ".join(f"{c['ChecklistId']} {c['Name']!r}" for c in (hits or have)) or "it has none"
+    raise Failed(f"{'no' if not hits else 'several'} checklists match {want!r}: {names}")
+
+
+def md_plain(line):
+    """What one line of Markdown says, as plain text: what a name can hold."""
+    fmt = quiz_format()
+    return " ".join(html.unescape(fmt.TAG.sub("", fmt.inline(line))).split())
+
+
+def md_text(text):
+    """Text as Markdown that says it back: a backslash before what would be
+    taken for code, emphasis or a link, and before a < only where a tag could
+    open, so that 'A < B' stays as it is."""
+    return re.sub(r"[\\`*\[\]]|<(?=[A-Za-z/!])", lambda m: "\\" + m.group(), text)
+
+
+def item_parts(text, where):
+    """(name, description HTML) for an item written in Markdown.
+
+    Its first line is the name, which Brightspace keeps as plain text, and the
+    lines after it are the description. A first line with a link or emphasis
+    in it, which a name cannot carry, opens the description as well, so that
+    nothing written is lost.
+    """
+    fmt = quiz_format()
+    first, _, rest = text.replace("\r\n", "\n").strip("\n").partition("\n")
+    name = md_plain(first)
+    if not name:
+        raise Failed(f"{where} has no text")
+    if fmt.FENCE.fullmatch(first.strip()):
+        raise Failed(f"{where}: its first line is its name, and cannot open a block of code")
+    if len(name) > NAME_MAX:
+        raise Failed(f"{where}: its first line is its name, {len(name)} characters long, and "
+                     f"Brightspace takes {NAME_MAX} at most")
+    if fmt.TAG.search(fmt.inline(first)):
+        rest = first + "\n\n" + rest
+    try:
+        return name, fmt.md_html(rest, where) if rest.strip() else ""
+    except fmt.Failed as e:
+        raise Failed(str(e))
+
+
+class Markdown(html.parser.HTMLParser):
+    """Rich text as Markdown again: what md_html makes, as Brightspace keeps it,
+    and anything else as near as that Markdown gets. A paragraph is a paragraph,
+    a line break a new line, a list item a line of its own and a program a
+    fenced block; a link, emphasis and code stay; any other tag keeps its text
+    and loses itself."""
+
+    BLOCKS = {"p", "div", "li", "ul", "ol", "pre", "blockquote", "table", "tr", "section",
+              "h1", "h2", "h3", "h4", "h5", "h6"}
+    MARKS = {"strong": "**", "b": "**", "em": "*", "i": "*"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.blocks = []
+        self.open = [["", [], None]]       # [tag, pieces, href], innermost last
+        self.program = None                # a <pre>'s text, while inside one
+
+    def flush(self):
+        while len(self.open) > 1:          # a block ends whatever opened inside it
+            self.close_inline()
+        text = re.sub(r" *\n *", "\n", "".join(self.open[0][1])).strip()
+        if text:
+            self.blocks.append(text)
+        self.open = [["", [], None]]
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if self.program is not None:       # a program: only its lines count
+            if tag == "br":
+                self.program.append("\n")
+        elif tag in self.BLOCKS:
+            # A list item's own paragraph stays on the item's line.
+            if not (len(self.open) == 1 and "".join(self.open[0][1]) == "- " and tag not in ("li", "pre")):
+                self.flush()
+            if tag == "pre":
+                self.program = []
+            elif tag == "li":
+                self.open[0][1].append("- ")
+        elif tag == "br":
+            self.open[-1][1].append("\n")
+        elif tag in ("td", "th"):
+            self.open[-1][1].append(" ")
+        elif tag in self.MARKS or tag in ("code", "a"):
+            self.open.append([tag, [], attrs.get("href")])
+        elif tag == "img" and attrs.get("alt"):
+            self.open[-1][1].append(md_text(attrs["alt"]))
+
+    def handle_endtag(self, tag):
+        if self.program is not None:
+            if tag == "pre":
+                code = "".join(self.program).replace("\xa0", " ").strip("\n")
+                self.program = None
+                if code.strip():
+                    run = "`" * max(3, max((len(r) for r in re.findall(r"`+", code)), default=0) + 1)
+                    self.blocks.append(f"{run}\n{code}\n{run}")
+        elif tag in self.BLOCKS:
+            self.flush()
+        elif any(t == tag for t, *_ in self.open[1:]):
+            while self.open[-1][0] != tag:    # misnested: what opened inside it closes first
+                self.close_inline()
+            self.close_inline()
+
+    def close_inline(self):
+        tag, pieces, href = self.open.pop()
+        inner = "".join(pieces)
+        core = inner.strip()
+        lead, trail = inner[:len(inner) - len(inner.lstrip())], inner[len(inner.rstrip()):]
+        if not core:
+            made = inner
+        elif tag == "code":
+            run = "`" * (max((len(r) for r in re.findall(r"`+", core)), default=0) + 1)
+            made = run + core + run
+        elif tag == "a":
+            url = re.sub(r"[\s()]", lambda m: f"%{ord(m.group()):02X}", href or "")
+            made = f"[{core}]({url})" if url else core
+        else:
+            made = self.MARKS[tag] + core + self.MARKS[tag]
+        self.open[-1][1].append(lead + made + trail)
+
+    def handle_data(self, data):
+        if self.program is not None:
+            self.program.append(data)
+        elif self.open[-1][0] == "code":
+            self.open[-1][1].append(data.replace("\n", " "))
+        else:
+            self.open[-1][1].append(md_text(re.sub(r"\s+", " ", data)))
+
+    def close(self):
+        super().close()
+        if self.program is not None:
+            self.handle_endtag("pre")
+        self.flush()
+
+
+def html_markdown(h):
+    """Markdown for rich text, a paragraph to a block: see Markdown."""
+    md = Markdown()
+    md.feed(h or "")
+    md.close()
+    return "\n\n".join(md.blocks)
+
+
+def item_text(item):
+    """An item as new-checklist's --item takes it: its name, and its description
+    under it -- unless the description opens with the name, as it does for a
+    first line that had a link in it."""
+    name = " ".join((item.get("Name") or "").split())
+    rich = item.get("Description") or {}
+    desc = html_markdown(rich.get("Html")) or md_text(rich.get("Text") or "").strip()
+    if desc and md_plain(desc.partition("\n")[0]) == name:
+        return desc
+    # A name Markdown would read as something else is escaped; any other stays as typed.
+    return (name if md_plain(name) == name else md_text(name)) + ("\n" + desc if desc else "")
+
+
+def due_utc(text, where):
+    """A due date in this machine's time, '2026-10-13 23:59', as D2L wants it;
+    None for none."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if not re.fullmatch(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d", text):
+        raise Failed(f"{where}: {text!r} is not a date and a time, as '2026-10-13 23:59'")
+    return local_to_utc(text.replace("T", " "))
+
+
+def cmd_checklists(args):
+    """A course's checklists; or, named, one checklist's items, each written the
+    way new-checklist takes it, so that what one prints the other can make."""
+    s, ou, _ = course(args)
+    s.keepalive = True
+    if not args.checklist:
+        have = checklists_of(s, ou)
+        rows = []
+        for c in have:
+            items = checklist_items(s, ou, c["ChecklistId"])
+            dues = sorted(local(i["DueDate"]) for i in items if i.get("DueDate"))
+            rows.append([c["ChecklistId"], c["Name"], len(items),
+                         f"{dues[0]} to {dues[-1]}" if len(dues) > 1 else "".join(dues)])
+        return emit(args, rows, ["id", "name", "items", "due"], have)
+    c = find_checklist(s, ou, args.checklist)
+    items = checklist_items(s, ou, c["ChecklistId"])
+    if args.json:
+        print(json.dumps({"checklist": c, "items": items}, indent=1))
+        return
+    print(f"{c['Name']!r}, checklist {c['ChecklistId']}: {len(items)} item{'' if len(items) == 1 else 's'}")
+    for n, item in enumerate(items, 1):
+        print(f"\n{n}. " + (f"due {local(item['DueDate'])}" if item.get("DueDate") else "no due date"))
+        print("\n".join("   " + line if line else "" for line in item_text(item).split("\n")))
+
+
+class ItemFlag(argparse.Action):
+    """--item and --due into one list, each --due the due date of the --item
+    just before it."""
+
+    def __call__(self, parser, ns, value, option_string=None):
+        items = getattr(ns, self.dest) or []
+        if option_string == "--item":
+            items.append([value, None])
+        elif not items or items[-1][1] is not None:
+            parser.error(f"--due {value}: each --due follows the --item it is the due date of")
+        else:
+            items[-1][1] = value
+        setattr(ns, self.dest, items)
+
+
+def post_checklist(s, ou, name, items):
+    """Make one checklist, its category and its items, and read them back."""
+    le, _ = s.versions()
+    base = f"/d2l/api/le/{le}/{ou}/checklists/"
+    cid = s.send("POST", base, {"Name": name, "Description": NO_TEXT})["ChecklistId"]
+    try:
+        cat = s.send("POST", f"{base}{cid}/categories/",
+                     {"Name": name, "Description": NO_TEXT, "SortOrder": 1})["CategoryId"]
+        for item in items:
+            s.send("POST", f"{base}{cid}/items/", {"CategoryId": cat, **item})
+    except Failed as e:
+        raise Failed(f"{e}\n  Checklist {cid} is there, made in part: delete it in Brightspace "
+                     "before posting it here again.")
+    print(f"  made checklist {cid}, with {len(items)} item{'' if len(items) == 1 else 's'}")
+    kept = checklist_items(s, ou, cid)
+    said = [text_pair(i["Description"]["Content"], (k.get("Description") or {}).get("Html"))
+            for i, k in zip(items, kept)]
+    check_landed([("name", name, s.api(f"{base}{cid}").get("Name")),
+                  ("items", [i["Name"] for i in items], [k.get("Name") for k in kept]),
+                  ("descriptions", [want for want, _ in said], [got for _, got in said]),
+                  ("due dates", [i["DueDate"] for i in items], [k.get("DueDate") for k in kept])],
+                 f"made checklist {cid}")
+
+
+def cmd_new_checklist(args):
+    """A checklist, the same in each of several courses: a name, and items
+    written in Markdown, each due at a time of its own or not at all.
+
+    Each --item is one item, and a --due after it is its due date, in this
+    machine's time. The item's first line is its name, which Brightspace keeps
+    as plain text; the lines after it are its description. A first line with a
+    link or emphasis in it opens the description too, so that nothing written
+    is lost.
+
+    Brightspace puts every item in a category, so the checklist gets one, of
+    its own name. Without --go it checks everything and prints what it would
+    send, and sends nothing. It refuses a course that already has a checklist
+    of the name before sending anything anywhere, and reads each one back once
+    it is made. The Markdown is bs-yaml-quiz's, so this needs PyYAML, as
+    setup-quiz does.
+    """
+    name = " ".join((args.name or "").split())
+    if not name:
+        raise Failed("a checklist needs a name: --name")
+    if len(name) > NAME_MAX:
+        raise Failed(f"the name is {len(name)} characters long, and Brightspace takes {NAME_MAX} at most")
+    if not args.items:
+        raise Failed("a checklist needs an item at least: --item, and --due after it for a due date")
+    items = []
+    for n, (text, due) in enumerate(args.items, 1):
+        part, desc = item_parts(text, f"item {n}")
+        items.append({"Name": part, "Description": {"Content": desc, "Type": "Html"} if desc else NO_TEXT,
+                      "SortOrder": n, "DueDate": due_utc(due, f"item {n}")})
+    labels = list(dict.fromkeys(args.courses))
+    places = [(label, course_site(label)) for label in labels]
+    s = open_session(args, places[0][1].host)
+    le, _ = s.versions()
+
+    print(f"{name!r}, {len(items)} item{'' if len(items) == 1 else 's'}:")
+    for item in items:
+        print(f"  {item['SortOrder']}. {item['Name']}  ({'due ' + local(item['DueDate']) if item['DueDate'] else 'no due date'})")
+        if item["Description"]["Content"]:
+            print(f"     {words(item['Description']['Content'])}")
+    print("\nwhat goes to each course, in this order:")
+    dump = lambda body: json.dumps(body, ensure_ascii=False)
+    print(f"  POST /d2l/api/le/{le}/<course>/checklists/ " + dump({"Name": name, "Description": NO_TEXT}))
+    print("  POST .../checklists/<its id>/categories/ " + dump({"Name": name, "Description": NO_TEXT, "SortOrder": 1}))
+    for item in items:
+        print("  POST .../checklists/<its id>/items/ " + dump({"CategoryId": "<the category's id>", **item}))
+    print()
+    clash = []
+    for label, place in places:
+        have = checklists_of(s, place.ou)
+        if any(same_name(c["Name"], name) for c in have):
+            clash.append(label)
+        print(f"  into {label}: " + ("it already has a checklist of this name" if label in clash else
+                                     f"{len(have)} checklist{'' if len(have) == 1 else 's'} there now, none of this name"))
+    if clash:
+        raise Failed(f"{', '.join(clash)} already {'has' if len(clash) == 1 else 'have'} a checklist named "
+                     f"{name!r}; nothing has been sent anywhere")
+    if not args.go:
+        print("\n  nothing sent; --go posts it")
+        return
+    failed = []
+    for label, place in places:
+        print(f"\n{label}:")
+        try:
+            post_checklist(s, place.ou, name, items)
+        except Failed as e:
+            failed.append(label)
+            print(f"  {e}")
+    if failed:
+        raise Failed(f"not done in {', '.join(failed)}")
+    print(f"\n{name!r} is in {', '.join(labels)}")
+
+
 # --- main -----------------------------------------------------------------
 
 def main(argv=None):
@@ -3546,6 +3893,9 @@ def main(argv=None):
     with_course("quizzes", cmd_quizzes, help="each quiz with its attempt counts")
     with_course("quiz", cmd_quiz, help="one quiz's settings: IP restriction, password, dates, attempts").add_argument(
         "quiz", help="the quiz's name (or enough of it), or its id")
+    with_course("checklists", cmd_checklists, description=cmd_checklists.__doc__,
+                help="the checklists; named, one checklist's items, as new-checklist takes them").add_argument(
+        "checklist", nargs="?", help="the checklist's name (or enough of it), or its id")
     x = with_course("new-category", cmd_new_category, help="create a grade category")
     x.add_argument("name")
     x.add_argument("--weight", required=True, help="its share of the final grade")
@@ -3670,6 +4020,18 @@ def main(argv=None):
     x.add_argument("--clear", action="store_true",
                    help="once every section has its copy, delete the quiz from the shell")
     x.set_defaults(fn=cmd_copy_quiz)
+
+    x = sub.add_parser("new-checklist", help="a checklist, the same in each of several courses: a name, and items "
+                                             "in Markdown with their due dates",
+                       description=cmd_new_checklist.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    x.add_argument("courses", nargs="+", metavar="COURSE", help=f"labels from {COURSES_FILE}, or org unit ids")
+    x.add_argument("--name", required=True, help="the checklist's name")
+    x.add_argument("--item", dest="items", action=ItemFlag, metavar="TEXT",
+                   help="an item, in Markdown: its first line is its name, the lines after it its description")
+    x.add_argument("--due", dest="items", action=ItemFlag, metavar="WHEN",
+                   help="the due date of the --item before it, in this machine's time: '2026-10-13 23:59'")
+    x.add_argument("--go", action="store_true", help="post it; without it, check and print what would be sent")
+    x.set_defaults(fn=cmd_new_checklist)
 
     x = with_course("delete-quiz", cmd_delete_quiz,
                     help="delete a quiz with no attempts, no questions and no grade item")

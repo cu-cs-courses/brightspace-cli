@@ -79,7 +79,7 @@ NEWS = [{"Id": 900, "Title": "Class 9, Closing Journal", "StartDate": "2026-09-2
 # A quiz's four rich-text fields in the read shape, as the live Quiz 2 returns them.
 RICH = {k: {"Text": {"Text": "", "Html": ""}, "IsDisplayed": k != "Instructions"}
         for k in ("Instructions", "Description", "Header", "Footer")}
-NEXT = {"folder": 88, "item": 777, "quiz": 5100, "made": 77}
+NEXT = {"folder": 88, "item": 777, "quiz": 5100, "made": 77, "checklist": 899, "checklist part": 9000}
 # A shell course for copy-quiz: no students and one quiz, which a copy job puts
 # into OU with its questions and without its grade item, as the live one does.
 SHELL = 1000500
@@ -91,6 +91,70 @@ SHELLS = {"quizzes": [{"QuizId": 5001, "Name": "Quiz 9", "IsActive": False, "Due
 JOBS, COPIED = {}, {}                       # copy jobs by token; questions of each copied quiz
 ACCESS_KEYS = {"keys": []}                  # Cloudflare Access's public keys, as brightspace-web fetches them
 COPYING = {"slow": False, "fail": False}    # a job that reads PROCESSING once; one that ends FAILED
+# Checklists by org unit, any org unit: each {"ChecklistId", "Name", "Description",
+# "categories": [...], "items": [...]}, the two lists kept in the read shape.
+CHECKLISTS = {}
+CHECKLISTS_DOWN = set()    # org units whose checklists answer 500, as a course might
+
+def checklist_rich(v):
+    """A checklist's rich text as D2L keeps it, measured on a sandbox 2026-10-07:
+    RichTextInput or nothing, its HTML rewritten -- a link gains rel="noopener"
+    and &mdash; becomes the dash -- and plain text kept as its own HTML."""
+    if not (isinstance(v, dict) and "Content" in v and v.get("Type") in ("Text", "Html")):
+        return None
+    c = v["Content"]
+    if v["Type"] == "Html":
+        c = c.replace("<a href=", '<a rel="noopener" href=').replace("&mdash;", "\u2014")
+    return {"Text": re.sub(r"<[^>]+>", "", c), "Html": c}
+
+def checklist_route(handler, method, ou, rest, body=None):
+    """GET and POST under /d2l/api/le/1.99/<ou>/checklists/, as the live routes
+    answer them: an item needs a category of its checklist, a due date (null
+    will do) and a place; a name is 1 to 512 characters."""
+    if ou in CHECKLISTS_DOWN:
+        return handler.send(500, {"title": "Internal Server Error"})
+    have = CHECKLISTS.setdefault(ou, [])
+    binding = {"title": "JSON Binding Error", "status": 400}
+    shown = lambda c: {k: c[k] for k in ("ChecklistId", "Name", "Description")}
+    m = re.fullmatch(r"(?:(\d+)(?:/(categories|items)/)?)?", rest)
+    if not m:
+        return handler.send(404, {"Errors": [{"Message": "unknown " + rest}]})
+    one = next((c for c in have if str(c["ChecklistId"]) == m.group(1)), None) if m.group(1) else None
+    if m.group(1) and not one:
+        return handler.send(404, {"title": "Not Found", "detail": f"Checklist {m.group(1)} not found"})
+    if method == "GET":
+        if not m.group(1):
+            return handler.send(200, {"Objects": [shown(c) for c in have], "Next": None})
+        if not m.group(2):
+            return handler.send(200, shown(one))
+        return handler.send(200, {"Objects": one[m.group(2)], "Next": None})
+    rich = checklist_rich(body.get("Description"))
+    name = body.get("Name")
+    if rich is None or not isinstance(name, str):
+        return handler.send(400, binding)
+    if not name or len(name) > 512:
+        return handler.send(400, {"title": "Validation Error", "detail": "Name cannot have more than 512 characters."})
+    if not m.group(1):
+        NEXT["checklist"] += 1
+        have.append({"ChecklistId": NEXT["checklist"], "Name": name, "Description": rich, "categories": [], "items": []})
+        return handler.send(200, shown(have[-1]))
+    if "SortOrder" not in body:
+        return handler.send(400, binding)
+    NEXT["checklist part"] += 1
+    if m.group(2) == "categories":
+        one["categories"].append({"CategoryId": NEXT["checklist part"], "Name": name, "Description": rich,
+                                  "SortOrder": body["SortOrder"]})
+        return handler.send(200, one["categories"][-1])
+    if not isinstance(body.get("CategoryId"), int) or "DueDate" not in body:
+        return handler.send(400, binding)
+    if body["CategoryId"] not in [c["CategoryId"] for c in one["categories"]]:
+        return handler.send(404, {"title": "Not Found", "detail": f"CategoryId {body['CategoryId']} not found"})
+    if "refuse me" in name:          # a write that fails halfway through, on purpose
+        return handler.send(400, {"title": "Validation Error", "detail": "refused, as asked"})
+    one["items"].append({"ChecklistItemId": NEXT["checklist part"], "CategoryId": body["CategoryId"],
+                         "ChecklistId": one["ChecklistId"], "Name": name, "Description": rich,
+                         "SortOrder": body["SortOrder"], "DueDate": body["DueDate"]})
+    return handler.send(200, one["items"][-1])
 
 def stored_rich(v):
     """What D2L keeps of rich text sent to it: {"Content", "Type"} comes back as
@@ -159,6 +223,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, [{"ProductCode": "le", "LatestVersion": "1.99"}, {"ProductCode": "lp", "LatestVersion": "1.63"}])
         if not p.startswith("/d2l/api/"): return self.send(404, "nope", "text/plain")
         if not self.api_ok(): return self.send(403, '{ Errors: [ {Message: "Forbidden"} ] }', "text/html")
+        m = re.fullmatch(r"/d2l/api/le/1\.99/(\d+)/checklists/(.*)", p)
+        if m: return checklist_route(self, "GET", int(m.group(1)), m.group(2))
         m = re.fullmatch(r"/d2l/api/le/1\.99/import/(\d+)/copy/(\w+)", p)
         if m:
             job = JOBS.get(m.group(2))
@@ -319,6 +385,13 @@ class H(BaseHTTPRequestHandler):
         # The body can only be read once, so read it here and let each branch parse it.
         n = int(self.headers.get("Content-Length", 0)); raw = self.rfile.read(n)
         form = urllib.parse.parse_qs(raw.decode())
+        m = re.fullmatch(r"/d2l/api/le/1\.99/(\d+)/checklists/(.*)", self.path)
+        if m:
+            if self.headers.get("X-Csrf-Token") != TOKEN["now"]:
+                return self.send(403, "CSRF token required", "text/plain")
+            if not self.api_ok():
+                return self.send(403, '{ Errors: [ {Message: "Forbidden"} ] }', "text/html")
+            return checklist_route(self, "POST", int(m.group(1)), m.group(2), json.loads(raw))
         m = re.fullmatch(r"/d2l/api/le/1\.99/import/(\d+)/copy/", self.path)
         if m:
             if self.headers.get("X-Csrf-Token") != TOKEN["now"]:
@@ -1253,7 +1326,7 @@ if COOKIES_OK:
         # The same file on the page: pasted or chosen, then checked, made or compared.
         proc, wport, first = start_web()
         here = f"127.0.0.1:{wport}"
-        got = fetch(wport, here)
+        got = fetch(wport, here, "/quizzes")
         web_check("web: the page has both forms", got, 200,
                   has=['action="/setup-quiz#', 'name="yaml"', 'action="/copy-quiz#', 'action="/make#', 'action="/defaults#'])
         token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
@@ -1369,13 +1442,13 @@ if COOKIES_OK:
         # each course's defaults, the empty fields of a quiz being its course's.
         proc, wport, first = start_web()
         here = f"127.0.0.1:{wport}"
-        got = fetch(wport, here)
+        got = fetch(wport, here, "/quizzes")
         token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
         web_check("web: the make form's empty fields show the course's defaults", got, 200,
                   has=['name="start" value="" placeholder="12:30"', 'option value="grp"', "sections 240",
                        '<p class="hint" id="gist">240&#x27;s defaults: opens 12:30, closes 14:00; 8 minutes',
                        '<td>240</td>', "opens 12:30, closes 14:00; 8 minutes; 2 attempts; a description"],
-                  lacks=['<form method="get" action="/" class="as">'])
+                  lacks=['class="as"'])
         web_check("web: Check runs setup-quiz with the fields filled in, and nothing else",
                   fetch(wport, here, "/make", {"token": token, "as": "you", "course": "240", "route": "course",
                                                "name": "Quiz 18", "date": "2026-10-27", "start": "", "minutes": "",
@@ -1396,7 +1469,7 @@ if COOKIES_OK:
                   fetch(wport, here, "/copy-quiz", {"token": token, "shell": "shell", "to": "240",
                                                     "item_like": "previous", "clear": "on", "action": "copy"}), 200,
                   has=["Copied", "shaped like &#x27;Quiz 17&#x27;", "the shell is empty again"])
-        got = fetch(wport, here + "", "/?edit=240")
+        got = fetch(wport, here, "/quizzes?edit=240")
         web_check("web: a course's defaults, to edit, as they are", got, 200,
                   has=['id="dcourse" list="courses" value="240"', 'name="d_start" value="12:30"',
                        'name="d_minutes" value="8"'])
@@ -1444,17 +1517,17 @@ if COOKIES_OK:
                           f"[session other]\ncourses = {theirs}\n\n"
                           f"[user ada@example.edu]\nsessions = me, other\n\n[user bob@example.edu]\nsessions = other\n")
         proc, wport, first = start_web("--access", str(webini))
-        got = fetch(wport, "bs.example.test", headers=asks())
+        got = fetch(wport, "bs.example.test", "/quizzes", headers=asks())
         web_check("web behind Access: the sessions one may act as, the first chosen", got, 200,
                   has=['<option value="me" selected>me</option><option value="other">other</option>',
                        'value="120"', "<td>240</td>"])
         token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
         web_check("web behind Access: the other session, with its own courses and its own defaults",
-                  fetch(wport, "bs.example.test", "/?as=other", headers=asks()), 200,
+                  fetch(wport, "bs.example.test", "/quizzes?as=other", headers=asks()), 200,
                   has=['<option value="other" selected>other</option>', 'value="shell"'],
                   lacks=['value="120"', "<td>240</td>"])
         web_check("web behind Access: someone given one session gets no choice",
-                  fetch(wport, "bs.example.test", headers=asks(dict(good, email="bob@example.edu"))), 200,
+                  fetch(wport, "bs.example.test", "/quizzes", headers=asks(dict(good, email="bob@example.edu"))), 200,
                   lacks=['class="as"', 'value="120"'])
         web_check("web behind Access: a session not given is refused",
                   fetch(wport, "bs.example.test", "/make", {"token": token, "as": "me", "course": "240",
@@ -1503,6 +1576,119 @@ if COOKIES_OK:
         has=["checked on the server: gone from the quiz list", "deleted 'Quiz 2'"])
     run("quizzes", "240", lacks=["Quiz 2"])
     run("delete-quiz", "240", "Quiz 2", "--go", ok=False, has=["no quizzes match"])
+
+# --- checklists: one checklist, the same in several courses ------------------
+try:
+    import yaml  # noqa: F401
+except ImportError:
+    yaml = None
+if COOKIES_OK and not yaml:
+    print("SKIP checklists and their tab: an item's Markdown is bs-yaml-quiz's, which needs PyYAML")
+if COOKIES_OK and yaml:
+    run("checklists", "240", has=["id", "name", "items", "due"], lacks=["Week"])
+    WEEK7 = ["--name", "Week 7",
+             "--item", "Read [chapter 3](https://example.edu/ch3)\nThe *notes* help &mdash; a lot.", "--due", "2026-10-13 23:59",
+             "--item", "Quiz 6 opens in class", "--due", "2026-10-13 12:30",
+             "--item", "Bring questions\n\nAny part of A5."]
+    run("new-checklist", "240", "120", *WEEK7,
+        has=["'Week 7', 3 items:", "1. Read chapter 3  (due 2026-10-13 23:59)", "3. Bring questions  (no due date)",
+             '"DueDate": null', "\"CategoryId\": \"<the category's id>\"",
+             "into 240: 0 checklists there now, none of this name", "into 120: 0 checklists",
+             "nothing sent; --go posts it"])
+    fails += any(CHECKLISTS.get(ou) for ou in (OU, 1000120))
+    print("   checking sent nothing:", not any(CHECKLISTS.get(ou) for ou in (OU, 1000120)))
+    run("new-checklist", "240", "120", *WEEK7, "--go",
+        has=["240:\n  made checklist 900, with 3 items", "120:\n  made checklist 901, with 3 items",
+             "checked on the server: name, items, descriptions, due dates", "'Week 7' is in 240, 120"])
+    made = CHECKLISTS[1000120][0]
+    due = dt.datetime.fromisoformat("2026-10-13 23:59").astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    good = ([c["Name"] for c in made["categories"]] == ["Week 7"]
+            and [i["Name"] for i in made["items"]] == ["Read chapter 3", "Quiz 6 opens in class", "Bring questions"]
+            and made["items"][0]["DueDate"] == due and made["items"][2]["DueDate"] is None
+            and 'rel="noopener" href="https://example.edu/ch3"' in made["items"][0]["Description"]["Html"])
+    fails += not good
+    print("   one category of its name, the items in order, due in UTC, the link in the description:", good)
+    run("new-checklist", "120", "--name", "week 7", "--item", "x", ok=False,
+        has=["into 120: it already has a checklist of this name",
+             "120 already has a checklist named 'week 7'; nothing has been sent anywhere"])
+    # Read back, each item as new-checklist takes it: the link and the emphasis
+    # survive Brightspace's rewriting of the HTML, and the dash its entity.
+    run("checklists", "120", has=["901", "Week 7", "3", "2026-10-13 12:30 to 2026-10-13 23:59"])
+    run("checklists", "120", "week", has=[
+        "'Week 7', checklist 901: 3 items", "1. due 2026-10-13 23:59",
+        "   Read [chapter 3](https://example.edu/ch3)\n\n   The *notes* help — a lot.",
+        "2. due 2026-10-13 12:30\n   Quiz 6 opens in class", "3. no due date\n   Bring questions\n   Any part of A5."])
+    run("--json", "checklists", "120", "901", has=['"ChecklistItemId"', '"checklist"'])
+    run("checklists", "120", "nope", ok=False, has=["no checklists match 'nope': 901 'Week 7'"])
+    run("new-checklist", "240", "--name", "Bad", "--item", "x", "--due", "tomorrow", ok=False,
+        has=["item 1: 'tomorrow' is not a date and a time, as '2026-10-13 23:59'"])
+    run("new-checklist", "240", "--name", "Bad", "--due", "2026-10-13 23:59", ok=False,
+        has=["each --due follows the --item"])
+    run("new-checklist", "240", "--name", "Bad", "--item", "x", "--due", "2026-10-13 23:59",
+        "--due", "2026-10-14 23:59", ok=False, has=["each --due follows the --item"])
+    run("new-checklist", "240", "--name", "Bad", ok=False, has=["an item at least"])
+    run("new-checklist", "240", "--name", " ", "--item", "x", ok=False, has=["a checklist needs a name"])
+    run("new-checklist", "240", "--name", "Bad", "--item", "```\ncode\n```", ok=False,
+        has=["item 1: its first line is its name, and cannot open a block of code"])
+    run("new-checklist", "240", "--name", "Bad", "--item", "ok", "--item", "x" * 513, ok=False,
+        has=["item 2: its first line is its name, 513 characters long"])
+    run("new-checklist", "nope", "--name", "Bad", "--item", "x", ok=False, has=["unknown course 'nope'"])
+
+    # The tab: first of the two, filled in from the newest checklist in the
+    # courses file's courses, ticking each that has one of its name.
+    proc, wport, first = start_web()
+    here = f"127.0.0.1:{wport}"
+    got = fetch(wport, here)
+    token = re.search(r'name="token" value="([^"]+)"', got[1]).group(1)
+    web_check("web: the checklist tab comes first, filled in from the newest checklist", got, 200,
+              has=['<a href="/?as=you" aria-current="page">Checklists</a><a href="/quizzes?as=you">Quizzes</a>',
+                   "Acting as Ada Lovelace (alovelace)", "Filled in from \u2018Week 7\u2019, the newest checklist here, in 240, 120, same and withsite.", 'value="Week 7"',
+                   ">Read [chapter 3](https://example.edu/ch3)\n\nThe *notes* help — a lot.</textarea>",
+                   'value="2026-10-13T23:59"', 'value="2026-10-13T12:30"', 'name="item_due" value=""',
+                   'name="to" value="120" checked', 'name="to" value="240" checked', 'name="to" value="shell">'],
+              lacks=['id="make-it"', 'class="as"'])
+    week8 = {"token": token, "name": "Week 8", "to": ["240", "120"],
+             "item_text": ["Read chapter 4", "", "Quiz 7\r\nIn class."], "item_due": ["2026-10-20T23:59", "", ""]}
+    web_check("web: Check runs new-checklist without --go, and keeps the form as it was sent",
+              fetch(wport, here, "/checklist", week8 | {"action": "plan"}), 200,
+              has=["Checked: nothing sent", "brightspace.py new-checklist 240 120 --name=&#x27;Week 8&#x27; "
+                   "--item=&#x27;Read chapter 4&#x27; --due=&#x27;2026-10-20 23:59&#x27; --item=&#x27;Quiz 7",
+                   "nothing sent; --go posts it", 'value="Week 8"', ">Quiz 7\nIn class.</textarea>"],
+              lacks=[" --go</code>"])
+    web_check("web: Post it posts it, into every course ticked",
+              fetch(wport, here, "/checklist", week8 | {"action": "go"}), 200,
+              has=["Posted", "made checklist", "checked on the server", "&#x27;Week 8&#x27; is in 240, 120"])
+    fine = [c["Name"] for c in CHECKLISTS[1000120]] == ["Week 7", "Week 8"]
+    fails += not fine; print("   Week 8 is in 120 beside Week 7:", fine)
+    web_check("web: the next one starts from the one just posted", fetch(wport, here), 200,
+              has=["Filled in from \u2018Week 8\u2019", 'value="2026-10-20T23:59"'])
+    CHECKLISTS_DOWN.add(SHELL)
+    web_check("web: a course that cannot be read is left out, and named",
+              fetch(wport, here), 200, has=["Filled in from \u2018Week 8\u2019",
+                                            "The checklists of shell could not be read."])
+    CHECKLISTS_DOWN.clear()
+    web_check("web: what the command refuses, the page shows",
+              fetch(wport, here, "/checklist", week8 | {"to": ["240"], "action": "go"}), 200,
+              has=["Stopped", "240 already has a checklist named &#x27;Week 8&#x27;"])
+    web_check("web: a checklist goes into a course of the courses file, never an option",
+              fetch(wport, here, "/checklist", week8 | {"to": ["--help"], "action": "plan"}), 200,
+              has=["Not run", "is not one of your courses"])
+    web_check("web: a checklist with no course ticked is not run",
+              fetch(wport, here, "/checklist", {k: v for k, v in week8.items() if k != "to"} | {"action": "plan"}), 200,
+              has=["Not run", "tick at least one course"])
+    web_check("web: a due date with no item is not run",
+              fetch(wport, here, "/checklist", week8 | {"item_text": ["", "x"], "item_due": ["2026-10-20T23:59", ""],
+                                                        "action": "plan"}), 200,
+              has=["Not run", "an item has a due date and no text"])
+    web_check("web: the quiz tab is a page of its own", fetch(wport, here, "/quizzes?as=you"), 200,
+              has=['<a href="/quizzes?as=you" aria-current="page">Quizzes</a>', 'id="make-it"'],
+              lacks=['id="items"'])
+    web_check("web: nothing else is a page", fetch(wport, here, "/checklists"), 404)
+    proc.terminate(); proc.wait()
+
+    # A write refused halfway leaves its checklist, and says where.
+    run("new-checklist", "240", "--name", "Partial", "--item", "fine", "--item", "refuse me", "--go", ok=False,
+        has=["Checklist 904 is there, made in part: delete it in Brightspace", "not done in 240"])
 
 run("logout", has=["forgot the session"])
 assert not (state / "session.json").exists()

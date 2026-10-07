@@ -2,11 +2,13 @@
 
 `brightspace.py` reads a course's Brightspace through its API, logged in as
 you: the entries students hand in to, the Journal, submitted files, quizzes,
-grade items, the classlist. A few commands write — a folder, a quiz, a grade
-item — and each one prints what it is about to send and reads the result back.
+grade items, the classlist, checklists. A few commands write — a folder, a
+quiz, a grade item, a checklist — and each one prints what it is about to send
+and reads the result back.
 
 It is one file, standard library only, plus `lz4` to read a session out of
-Firefox and PyYAML for `setup-quiz`, which reads a quiz's YAML. Written for
+Firefox and PyYAML for `setup-quiz`, which reads a quiz's YAML, and for
+`new-checklist`, whose Markdown is that reader's. Written for
 Commonwealth University's Brightspace, whose CU accounts log in through single
 sign-on; `--base-url` or `$BRIGHTSPACE_URL` names any other host.
 
@@ -38,6 +40,7 @@ Python 3.11 or newer; the suite runs on 3.11 and 3.13.
     ./brightspace.py quiz 240 'Midterm Part 1'   one quiz's settings, IP restriction included
     ./brightspace.py classlist 240
     ./brightspace.py announcements 240
+    ./brightspace.py checklists 115-01         the checklists; named, one's items as new-checklist takes them
     ./brightspace.py ping                   one call, to keep the session from idling out
     ./brightspace.py keepalive              the same for every session in the keepalive file
     ./brightspace.py logout
@@ -362,6 +365,8 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py grade 240 Presentation --max 'Ada Lovelace' 'Alan Turing' [--go]
     ./brightspace.py delete-quiz 230 Untitled --go
     ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like previous [--go] [--clear]
+    ./brightspace.py new-checklist 115-01 115-02 115-03 --name 'Week 7' \
+        --item 'Read chapter 3' --due '2026-10-13 23:59' --item 'Quiz 6' [--go]
 
 Each prints the exact body it is about to send, `--dry-run` stops before
 sending, and after sending **each reads its object back** and prints `checked
@@ -525,6 +530,29 @@ leaves the shell ready for the next. Dates are copied as they are, so sections
 that meet on different days set their own in the web page. Measured on three
 sandboxes on 2026-10-04: a few seconds a section, and attempts never copied.
 
+**`new-checklist` makes one checklist in several courses at once,** the same
+in each: a name, and items, each with a due date of its own or none.
+
+    ./brightspace.py new-checklist 115-01 115-02 115-03 --name 'Week 7' \
+        --item $'Read [chapter 3](https://example.edu/ch3)\nThe exercises are *optional*.' \
+        --due '2026-10-13 23:59' --item 'Quiz 6 opens in class' --due '2026-10-13 12:30'
+
+An item is Markdown, the Markdown of [bs-yaml-quiz](extras/bs-yaml-quiz/README.md):
+its first line is its name, what students tick off, and the lines after it are
+its description, shown beneath. A name is plain text in Brightspace, so a first
+line with a link or emphasis in it opens the description as well, and nothing
+written is lost. A `--due` is the due date of the `--item` before it, in this
+machine's time. Bare, it checks everything and prints every body it would
+send; `--go` posts it. It refuses before sending anything if a course already
+has a checklist of the name, and reads each one back, comparing a description
+by its words, since Brightspace rewrites the HTML (a link gains
+`rel="noopener"`, `&mdash;` becomes the dash).
+
+`checklists 115-01 'Week 7'` prints a checklist's items in the same Markdown,
+so what it prints `new-checklist` takes back. Brightspace puts every item in a
+category, and refuses one without; a checklist made here has one, of its own
+name. Names are 512 characters at most. Measured on a sandbox, 2026-10-07.
+
 **A quiz copied from one that shows in the calendar needs a date.** `new-quiz`
 carries the template's *Display in calendar* over, and Brightspace refuses such
 a quiz with no `--start` or `--end`: "Cannot have schedule association without
@@ -624,12 +652,27 @@ minted bearer token. `announcements` reads them, which works.
 *Per-question quiz results.* `quizzes` gives the attempt counts, which is the
 denominator the Statistics page does not print.
 
+*A student's ticks on a checklist.* The checklist routes make and read
+checklists, their categories and their items, and nothing reads who has ticked
+what. Nor has a checklist dates or a switch to hide it: an item's due date is
+the only date in it.
+
 ## A web page
 
-`brightspace-web.py` puts the quiz commands on a page, for whoever would
-rather not type them; the rest can follow. Each button runs the command the
-page shows and prints what it printed, so the page checks and refuses exactly
-what the command does. It has three parts:
+`brightspace-web.py` puts the checklist and quiz commands on a page, for
+whoever would rather not type them; the rest can follow. Each button runs the
+command the page shows and prints what it printed, so the page checks and
+refuses exactly what the command does. A header says whose session it acts as,
+with a choice of sessions when there is one, and under it are two tabs.
+
+**Checklists**, the first, is `new-checklist`: a name, and items, each a box of
+Markdown and a due date, posted into every course ticked. It starts from the
+newest checklist in the session's courses, ticking the courses that have one of
+its name, so a weekly checklist is last week's with its name changed and
+*Every due date a week later* pressed. A course that already has a checklist of
+the name is refused, as the command refuses it.
+
+**Quizzes** has three parts:
 
 1. **Make a quiz**, `setup-quiz`: in its course, or in an empty shell, to be
    copied into the course's sections afterwards. A field left empty is the

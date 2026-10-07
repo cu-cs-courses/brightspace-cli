@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""A web page for brightspace.py, for whoever would rather not type its commands:
-making a quiz, in its course or in a shell to copy into several sections,
-copying it, and each course's quiz defaults.
+"""A web page for brightspace.py, for whoever would rather not type its commands.
+Two tabs, under a header that says whose session it acts as:
+
+    Checklists    a checklist, the same in several courses at once: its name,
+                  and items in Markdown with their due dates, filled in from
+                  the newest checklist in those courses to start from
+    Quizzes       making a quiz, in its course or in a shell to copy into
+                  several sections, copying it, and each course's quiz defaults
 
     ./brightspace-web.py                          on your own machine, as you
     ./brightspace-web.py --access web.ini         behind Cloudflare Access, as whoever signed in
@@ -43,10 +48,12 @@ page you visit elsewhere cannot press its buttons for you. Ctrl-C stops it.
 
 import argparse
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import html
 import http.server
+import itertools
 import json
 import os
 import pathlib
@@ -245,13 +252,38 @@ td { border-top: 1px solid var(--line); padding: .4rem .5rem .4rem 0; vertical-a
 td:first-child { font-weight: 600; white-space: nowrap; }
 td:last-child { text-align: right; white-space: nowrap; }
 a { color: var(--accent); }
+:root { color-scheme: light dark; }
+header.top { background: var(--box); border-bottom: 1px solid var(--line); }
+header.top .in { max-width: 48rem; margin: 0 auto; padding: 1rem 1rem 0; }
+.bar { display: flex; gap: .5rem 1.5rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.bar h1, .bar .as { margin: 0; }
+header .who { margin: .3rem 0 .6rem; font-size: .9rem; }
+.tabs { display: flex; gap: .25rem; overflow-x: auto; }
+.tabs a { padding: .45rem .9rem; color: var(--muted); text-decoration: none; white-space: nowrap;
+          border-bottom: 3px solid transparent; }
+.tabs a:hover { color: var(--fg); }
+.tabs a[aria-current=page] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+main > h2.part:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+ol.items { list-style: none; margin: .5rem 0; padding: 0; counter-reset: item; }
+ol.items > li { counter-increment: item; display: grid; grid-template-columns: 1.6rem 1fr; gap: 0 .4rem;
+                padding: .6rem 0; border-top: 1px solid var(--line); }
+ol.items > li::before { content: counter(item) "."; color: var(--muted); text-align: right; padding-top: .4rem; }
+ol.items textarea { font: inherit; margin: 0; }
+ol.items .when { grid-column: 2; display: flex; gap: .5rem 1rem; align-items: center; flex-wrap: wrap;
+                 margin-top: .4rem; }
+ol.items .when label { display: flex; gap: .4rem; align-items: center; margin: 0; color: var(--muted);
+                       font-size: .9rem; }
+input[type=datetime-local] { font: inherit; padding: .3rem .45rem; border: 1px solid var(--line);
+                             border-radius: 6px; background: var(--bg); color: var(--fg); }
+button.small { padding: .25rem .75rem; font-size: .9rem; }
+button.remove { border-color: var(--line); color: var(--muted); }
 </style>"""
 
 # Fills each field's greyed default from the chosen course's, says them in a
 # line under the course, and keeps a course taught as sections to the shell;
 # loads a course's saved defaults into their form when it is chosen there; and
 # reads a chosen file into the box.
-SCRIPT = """<script>
+QUIZ_SCRIPT = """<script>
 var DEFAULTS = JSON.parse(document.getElementById("defaults").textContent);
 var GISTS = JSON.parse(document.getElementById("gists").textContent);
 function course_changed() {
@@ -290,6 +322,40 @@ document.getElementById("pick").addEventListener("change", function () {
   var file = this.files[0], form = this.form;
   if (file) file.text().then(function (text) { form.yaml.value = text; form.filename.value = file.name; });
 });
+</script>"""
+
+# Adds an item from the template and takes one away, never the last; moves
+# every due date a week on, for a checklist filled in from last week's; and
+# fits each box to its text, a long link wrapped on a phone included.
+CHECKLIST_SCRIPT = """<script>
+(function () {
+  var list = document.getElementById("items"), row = document.getElementById("item-row");
+  function fit(box) { box.style.height = "auto"; box.style.height = (box.scrollHeight + 2) + "px"; }
+  function add() {
+    var li = row.content.firstElementChild.cloneNode(true);
+    list.appendChild(li);
+    fit(li.querySelector("textarea"));
+    li.querySelector("textarea").focus();
+  }
+  list.querySelectorAll("textarea").forEach(fit);
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  document.getElementById("add").addEventListener("click", add);
+  list.addEventListener("click", function (e) {
+    if (!e.target.classList.contains("remove")) return;
+    e.target.closest("li").remove();
+    if (!list.children.length) add();
+  });
+  list.addEventListener("input", function (e) { if (e.target.tagName === "TEXTAREA") fit(e.target); });
+  document.getElementById("later").addEventListener("click", function () {
+    list.querySelectorAll("input[type=datetime-local]").forEach(function (el) {
+      if (!el.value) return;
+      var d = new Date(el.value);       // local time, as the field holds it
+      d.setDate(d.getDate() + 7);       // the same time of day across a change of clocks
+      el.value = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+                 "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+    });
+  });
+})();
 </script>"""
 
 REFUSED = """<!doctype html>
@@ -384,10 +450,44 @@ def gist(keys):
     return "; ".join(bits) or "nothing yet"
 
 
-def page(profiles, profile, form=None, slots=None, edit=None, copy=None, fresh=False):
-    form, slots, copy = form or {}, slots or {}, copy or {}
+# The tabs, each a page of its own: (its name, its path, its label).
+TABS = [("checklists", "/", "Checklists"), ("quizzes", "/quizzes", "Quizzes")]
+
+
+def top(profiles, profile, tab, who):
+    """The header over every tab: whose session the page acts as, and the tabs."""
     esc = html.escape
+    path = {t: p for t, p, _ in TABS}[tab]
+    out = ['<header class="top"><div class="in"><div class="bar"><h1>Brightspace</h1>']
+    # Whose session: each person picks among those web.ini gives them.
+    if len(profiles) > 1:
+        out.append(f'<form method="get" action="{path}" class="as"><label for="as">Session</label>'
+                   '<select id="as" name="as" onchange="this.form.submit()">'
+                   + options([(p["name"], p["name"]) for p in profiles], profile["name"])
+                   + "</select><noscript><button>Switch</button></noscript></form>")
+    out.append(f'</div><p class="who">{esc(who)}</p><nav class="tabs">')
+    for t, p, label in TABS:
+        out.append(f'<a href="{p}?as={urllib.parse.quote(profile["name"])}"'
+                   + (' aria-current="page"' if t == tab else "") + f">{label}</a>")
+    return "".join(out) + "</nav></div></header>"
+
+
+def page(profiles, profile, tab="checklists", form=None, slots=None, edit=None, copy=None, fresh=False):
+    form, slots = form or {}, slots or {}
     who, rows = known(profile)
+    if tab == "quizzes":
+        body, script = quiz_part(profile, rows, form, slots, edit, copy or {}, fresh)
+    else:
+        body, script = checklist_part(profile, rows, form, slots)
+    return "\n".join(["<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">",
+                      '<meta name="viewport" content="width=device-width, initial-scale=1">',
+                      f"<title>Brightspace {tab}</title>", STYLE, "</head><body>",
+                      top(profiles, profile, tab, who), "<main>", *body, "</main>", script, "</body></html>"])
+
+
+def quiz_part(profile, rows, form, slots, edit, copy, fresh):
+    """The quiz tab: (its HTML, its script)."""
+    esc = html.escape
     defaults, problem = defaults_of(profile)
     labels = [label for label, _, _ in rows]
     named = {label: f"{label} — {name}" if name else label for label, _, name in rows}
@@ -412,18 +512,7 @@ def page(profiles, profile, form=None, slots=None, edit=None, copy=None, fresh=F
                 f' placeholder="{esc(hold)}" data-default="{key}" data-none="{esc(none)}"'
                 + (" required" if key == "name" else "") + "></label>")
 
-    out = ["<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">",
-           '<meta name="viewport" content="width=device-width, initial-scale=1">',
-           "<title>Brightspace quizzes</title>", STYLE, "</head><body><main>",
-           "<h1>Quizzes on Brightspace</h1>"]
-    # Whose session: each person picks among those web.ini gives them.
-    if len(profiles) > 1:
-        out.append('<form method="get" action="/" class="as"><label for="as">Acting as</label>'
-                   f'<select id="as" name="as" onchange="this.form.submit()">'
-                   + options([(p["name"], p["name"]) for p in profiles], profile["name"])
-                   + "</select><noscript><button>Switch</button></noscript></form>")
-    out.append(f'<p class="who">{esc(who)}</p>')
-
+    out = []
     # 1. Make a quiz: in the course, or in a shell to copy from.
     out.append('<h2 class="part" id="make-it">1. Make a quiz</h2>')
     out.append(f'<form method="post" action="/make#make-it" id="make" data-touched="{"1" if form.get("shell") else ""}">'
@@ -501,7 +590,7 @@ def page(profiles, profile, form=None, slots=None, edit=None, copy=None, fresh=F
         out.append(f'<p class="bad">{esc(problem)}</p>')
     if defaults:
         out.append("<table>" + "".join(
-            f'<tr><td>{esc(c)}</td><td>{esc(gist(keys))}</td><td><a href="/?as={urllib.parse.quote(profile["name"])}'
+            f'<tr><td>{esc(c)}</td><td>{esc(gist(keys))}</td><td><a href="/quizzes?as={urllib.parse.quote(profile["name"])}'
             f'&amp;edit={urllib.parse.quote(c)}#defaults-of">edit</a></td></tr>' for c, keys in defaults.items())
             + "</table>")
     # The defaults form holds one course's saved defaults, or what was just
@@ -545,10 +634,135 @@ def page(profiles, profile, form=None, slots=None, edit=None, copy=None, fresh=F
                + '</fieldset><div class="buttons"><button name="action" value="save" class="go">Save</button>'
                "</div></form>")
     out.append(slots.get("saved", ""))
-    out.append('</main><script type="application/json" id="defaults">'
-               + json.dumps(defaults).replace("</", "<\\/") + '</script><script type="application/json" id="gists">'
-               + json.dumps(gists).replace("</", "<\\/") + "</script>" + SCRIPT + "</body></html>")
-    return "\n".join(out)
+    return out, ('<script type="application/json" id="defaults">' + json.dumps(defaults).replace("</", "<\\/")
+                 + '</script><script type="application/json" id="gists">' + json.dumps(gists).replace("</", "<\\/")
+                 + "</script>" + QUIZ_SCRIPT)
+
+
+def newest_checklist(profile, places):
+    """The newest checklist in any of these courses, for the form to start from:
+    (its name, [(item text, due)], the courses with one of its name) or None;
+    the courses whose checklists could not be read; and why none could, or
+    None. Newest is the highest id: Brightspace gives them out in order."""
+    if not places:
+        return None, [], None
+
+    def listed(place):
+        try:
+            return B.checklists_of(s, place[1])
+        except (B.Failed, B.NotLoggedIn):
+            return None
+    try:
+        s = B.open_session(argparse.Namespace(base_url=None, json=False), session=profile["session"])
+        s.keepalive = True
+        with concurrent.futures.ThreadPoolExecutor(8) as pool:
+            found = dict(zip([label for label, _, _ in places], pool.map(listed, places)))
+        unread = [label for label, have in found.items() if have is None]
+        if len(unread) == len(places):
+            return None, [], "no course answered"
+        every = [(c["ChecklistId"], label, c) for label, have in found.items() for c in have or []]
+        if not every:
+            return None, unread, None
+        _, label, newest = max(every, key=lambda x: x[0])
+        ou = {lb: o for lb, o, _ in places}[label]
+        items = [(B.item_text(i), B.local_dt(i["DueDate"]).strftime("%Y-%m-%dT%H:%M") if i.get("DueDate") else "")
+                 for i in B.checklist_items(s, ou, newest["ChecklistId"])]
+        have = [lb for lb, cs in found.items() if any(B.same_name(c["Name"], newest["Name"]) for c in cs or [])]
+        return (newest["Name"], items, have), unread, None
+    except (B.Failed, B.NotLoggedIn) as e:
+        return None, [], str(e)
+
+
+def and_list(words):
+    """'a', 'a and b', 'a, b and c'."""
+    return " and ".join(filter(None, [", ".join(words[:-1]), words[-1]])) if words else ""
+
+
+def item_row(text, due):
+    """One item of the checklist form: its Markdown, its due date, and a way to take it out."""
+    esc = html.escape
+    return (f'<li><textarea name="item_text" rows="{min(12, max(2, text.count(chr(10)) + 1))}"'
+            ' aria-label="The item, in Markdown" placeholder="Read chapter 3">' + esc(text) + "</textarea>"
+            f'<div class="when"><label>Due<input type="datetime-local" name="item_due" value="{esc(due)}"></label>'
+            '<button type="button" class="remove small">Remove</button></div></li>')
+
+
+def checklist_part(profile, rows, form, slots):
+    """The checklist tab: (its HTML, its script). It starts from the newest
+    checklist in the session's courses, ticking the courses that have one of
+    its name, and once sent it keeps what was sent."""
+    esc = html.escape
+    places = [(label, ou, name) for label, ou, name in rows if ou]
+    if "name" in form:
+        name, ticked, start = form.get("name", ""), set(form.get("to") or []), ""
+        items = [(t.replace("\r\n", "\n"), d) for t, d in
+                 itertools.zip_longest(form.get("item_text") or [], form.get("item_due") or [], fillvalue="")]
+    else:
+        newest, unread, error = newest_checklist(profile, places)
+        if newest:
+            name, items, have = newest
+            ticked = set(have)
+            start = (f"Filled in from \u2018{name}\u2019, the newest checklist here, in {and_list(have)}. "
+                     "Give it a new name: a course refuses a second checklist of the same one.")
+        else:
+            name, items, ticked = "", [], set()
+            start = (f"The checklists could not be read, so this one starts empty: {error}" if error else
+                     "None of these courses has a checklist yet, so this one starts empty.")
+        if unread:
+            start += f" The checklists of {and_list(unread)} could not be read."
+    items = [(t, d) for t, d in items if t.strip() or d.strip()] or [("", "")]
+    hidden = (f'<input type="hidden" name="token" value="{TOKEN}">'
+              f'<input type="hidden" name="as" value="{esc(profile["name"])}">')
+    boxes = "".join(f'<label><input type="checkbox" name="to" value="{esc(label)}"'
+                    f'{" checked" if label in ticked else ""}>{esc(f"{label} — {title}" if title else label)}</label>'
+                    for label, _, title in places)
+    out = ['<form method="post" action="/checklist#posted" id="checklist">' + hidden,
+           '<fieldset><legend>The checklist</legend>'
+           + (f'<p class="hint">{esc(start)}</p>' if start else "")
+           + f'<label>Name<input type="text" name="name" value="{esc(name)}" maxlength="512" required></label>'
+           '<p class="hint">An item\'s first line is what students tick off; the lines under it are shown '
+           "beneath it. Both are Markdown: *emphasis*, **bold**, `code`, [a link](https://…). A due date is "
+           "optional.</p>"
+           '<ol class="items" id="items">' + "".join(item_row(t, d) for t, d in items) + "</ol>"
+           '<div class="buttons"><button type="button" id="add" class="small">Add an item</button>'
+           '<button type="button" id="later" class="small">Every due date a week later</button></div></fieldset>',
+           '<fieldset><legend>Into</legend><p class="hint">Every course it goes into, the same in each.</p>'
+           + (boxes or '<p class="bad">There are no courses to post it into: the courses file lists none '
+                       "that names an org unit.</p>") + "</fieldset>",
+           '<div class="buttons"><button name="action" value="plan">Check, and send nothing</button>'
+           '<button name="action" value="go" class="go">Post it</button></div></form>',
+           f'<template id="item-row">{item_row("", "")}</template>',
+           '<div id="posted">' + slots.get("posted", "") + "</div>"]
+    return out, CHECKLIST_SCRIPT
+
+
+def run_checklist(form, profile):
+    """new-checklist for the checklist form: each item that has text, with its
+    due date after it when it has one."""
+    labels = labels_of(profile)
+    to = form.get("to") or []
+    for label in to:
+        if label not in labels:
+            raise ValueError(f"{label!r} is not one of your courses")
+    if not to:
+        raise ValueError("tick at least one course to post it into")
+    if not form.get("name", "").strip():
+        raise ValueError("the checklist needs a name")
+    argv = ["new-checklist", *to, "--name=" + form["name"].strip()]
+    for text, due in itertools.zip_longest(form.get("item_text") or [], form.get("item_due") or [], fillvalue=""):
+        text = text.replace("\r\n", "\n").strip("\n")
+        if not text.strip():
+            if due.strip():
+                raise ValueError("an item has a due date and no text")
+            continue
+        argv.append("--item=" + text)
+        if due.strip():
+            argv.append("--due=" + due.strip().replace("T", " "))
+    if not any(arg.startswith("--item=") for arg in argv):
+        raise ValueError("the checklist needs an item at least")
+    if form.get("action") == "go":
+        argv.append("--go")
+    return command(argv, profile)
 
 
 def command(argv, profile, cwd=None):
@@ -722,11 +936,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (Refused, OSError, ValueError, B.Failed) as e:
             return self.reply(403, REFUSED.format(why=html.escape(str(e))))
         u = urllib.parse.urlsplit(self.path)
-        if u.path != "/":
+        tab = next((t for t, path, _ in TABS if path == u.path), None)
+        if not tab:
             return self.reply(404, REFUSED.format(why="Nothing is at that address."))
         q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
         profile = next((p for p in profiles if p["name"] == q.get("as")), profiles[0])
-        self.reply(200, page(profiles, profile, {"course": q.get("course", "")}, edit=q.get("edit")))
+        self.reply(200, page(profiles, profile, tab, {"course": q.get("course", "")}, edit=q.get("edit")))
 
     def do_POST(self):
         try:
@@ -734,23 +949,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (Refused, OSError, ValueError, B.Failed) as e:
             return self.reply(403, REFUSED.format(why=html.escape(str(e))))
         where = urllib.parse.urlsplit(self.path).path
-        if where not in ("/make", "/setup-quiz", "/copy-quiz", "/defaults"):
+        if where not in ("/make", "/setup-quiz", "/copy-quiz", "/defaults", "/checklist"):
             return self.reply(404, REFUSED.format(why="Nothing is at that address."))
         size = int(self.headers.get("Content-Length") or 0)
         if size > 2_000_000:
             return self.reply(413, REFUSED.format(why="That is more than a quiz file; nothing was run."))
         fields = urllib.parse.parse_qs(self.rfile.read(size).decode("utf-8"), keep_blank_values=True)
-        form = {k: (v if k in ("to", "d_sections") else v[0]) for k, v in fields.items()}
+        form = {k: (v if k in ("to", "d_sections", "item_text", "item_due") else v[0]) for k, v in fields.items()}
         if not secrets.compare_digest(form.get("token", ""), TOKEN):
             return self.reply(403, REFUSED.format(why="That form is from an earlier run of this page, or from "
                                                       "somewhere else. Reload the page and try again."))
         profile = next((p for p in profiles if p["name"] == form.get("as", profiles[0]["name"])), None)
         if profile is None:
             return self.reply(403, REFUSED.format(why=f"You may not act as {html.escape(form.get('as', ''))}."))
-        slot = {"/make": "made", "/setup-quiz": "made_file", "/copy-quiz": "copied", "/defaults": "saved"}[where]
+        slot = {"/make": "made", "/setup-quiz": "made_file", "/copy-quiz": "copied", "/defaults": "saved",
+                "/checklist": "posted"}[where]
+        tab = "checklists" if where == "/checklist" else "quizzes"
         action, csv, copy, edit = form.get("action"), None, None, None
         try:
-            if where == "/make":
+            if where == "/checklist":
+                line, code, output = run_checklist(form, profile)
+            elif where == "/make":
                 line, code, output = run_make(form, profile)
             elif where == "/setup-quiz":
                 line, code, output, csv = run_setup(form, profile)
@@ -758,21 +977,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 line, code, output = run_copy(form, profile)
                 form["from"] = form.get("shell", "")
             elif action == "load":
-                return self.reply(200, page(profiles, profile, form, edit=form.get("dcourse", "").strip(),
+                return self.reply(200, page(profiles, profile, tab, form, edit=form.get("dcourse", "").strip(),
                                             fresh=True))
             else:
                 line, code, output = run_defaults(form, profile)
                 edit = form.get("dcourse", "").strip()
         except ValueError as e:
             note = f'<section class="result"><h2 class="bad">Not run</h2><p>{html.escape(str(e))}</p></section>'
-            return self.reply(200, page(profiles, profile, form, {slot: note},
+            return self.reply(200, page(profiles, profile, tab, form, {slot: note},
                                         edit=form.get("dcourse", "").strip() if where == "/defaults" else None,
                                         fresh=isinstance(e, NotLoaded)))
         except subprocess.TimeoutExpired:
             note = ('<section class="result"><h2 class="bad">Still running after half an hour</h2>'
                     "<p>Look in Brightspace before trying again.</p></section>")
-            return self.reply(200, page(profiles, profile, form, {slot: note}))
-        if where == "/copy-quiz":
+            return self.reply(200, page(profiles, profile, tab, form, {slot: note}))
+        if where == "/checklist":
+            verdict = "Stopped" if code else "Posted" if action == "go" else "Checked: nothing sent"
+        elif where == "/copy-quiz":
             verdict = "Stopped" if code else "Copied" if action == "copy" else "Checked: nothing sent"
         elif where == "/defaults":
             verdict = "Not saved" if code else "Saved"
@@ -793,7 +1014,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "item_like": keys.get("item_like", "previous"), "clear": True}
             extra += ("<p>Next, in the shell, its questions; then step 2 below copies it into the sections, "
                       "ready as it is.</p>")
-        self.reply(200, page(profiles, profile, form, {slot: result(verdict, code == 0, line, output, extra)},
+        self.reply(200, page(profiles, profile, tab, form, {slot: result(verdict, code == 0, line, output, extra)},
                              edit=edit, copy=copy, fresh=where == "/defaults" and not code))
 
 
