@@ -2131,6 +2131,15 @@ def cmd_set_quiz(args):
         # and the mechanics, which is where E1 put them. An HTML file, kept in
         # the repo beside the quiz so setup.sh can apply it.
         html_text = pathlib.Path(args.header).read_text(encoding="utf-8").strip()
+        # D2L substitutes a replace string for the caller at save time when the
+        # text arrives through the API: a header with {OrgDefinedId} written this
+        # way carries the instructor's own ID for every student. 230's midterm,
+        # 2026-10-07: ten students in one seat. The quiz editor keeps the string.
+        strings = sorted(set(re.findall(r"\{[A-Za-z]+\}", html_text)))
+        if strings:
+            raise Failed(f"the header holds the replace string{'s' if len(strings) > 1 else ''} "
+                         f"{', '.join(strings)}; saved through the API it would carry your own value "
+                         "for every student. Write it in the quiz editor, and check the link as a student.")
         changed["Header"] = {"Text": {"Content": html_text, "Type": "Html"}, "IsDisplayed": True}
     changed = {k: v for k, v in changed.items()
                if k == "Header" or before.get(k) != v}
