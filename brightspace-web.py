@@ -31,6 +31,7 @@ lets in picks among those web.ini gives them:
     [session ada]                          # a [name] in the keepalive file
     courses = ~/.config/brightspace/courses.ini
     defaults = ~/.config/brightspace/quiz-defaults.yml   # quiz-defaults-ada.yml beside this file if left out
+    owner = Ada Lovelace                   # the header's name for its owner, if not Brightspace's
 
     [user ada@example.edu]
     sessions = ada, bob                    # the ones they may act as, the first where they start
@@ -136,7 +137,7 @@ class Access:
                 name = section[8:].strip()
                 if not keys.get("courses"):
                     raise B.Failed(f"{self.path}, [{section}]: a session needs courses, the file its labels are in")
-                self.sessions[name] = self.profile(name, keys["courses"], keys.get("defaults"))
+                self.sessions[name] = self.profile(name, keys["courses"], keys.get("defaults"), keys.get("owner"))
         for section, keys in conf.items():
             if not section.startswith("user "):
                 continue
@@ -158,10 +159,11 @@ class Access:
             self.problem = (f"{self.path} does not yet say which Access application to trust: "
                             "its [access] needs team, aud and host")
 
-    def profile(self, name, courses, defaults):
+    def profile(self, name, courses, defaults, owner=None):
         """A session the page can act as: its name in the keepalive file, its
-        courses file, and its quiz defaults, by default a file of its own."""
-        return {"name": name, "session": name, "courses": B.file_path(self.path, courses),
+        courses file, its quiz defaults, by default a file of its own, and what
+        the header calls its owner, by default the name Brightspace has."""
+        return {"name": name, "session": name, "owner": owner, "courses": B.file_path(self.path, courses),
                 "defaults": (B.file_path(self.path, defaults) if defaults
                              else self.path.resolve().parent / f"quiz-defaults-{name}.yml")}
 
@@ -200,7 +202,7 @@ class Access:
 
 # On one's own machine: the session `brightspace.py session` took, and the
 # courses file and quiz defaults the command finds by itself.
-YOU = {"name": "you", "session": None, "courses": None, "defaults": None}
+YOU = {"name": "you", "session": None, "owner": None, "courses": None, "defaults": None}
 
 
 # --- what the page shows ----------------------------------------------------------
@@ -383,7 +385,10 @@ def known(profile):
     try:
         s = B.open_session(argparse.Namespace(base_url=None, json=False), session=profile["session"])
         me = B.whoami(s)
-        who = f"Acting as {me.get('FirstName')} {me.get('LastName')} ({me.get('UniqueName')}) in Brightspace."
+        # The username is Brightspace's whatever the owner goes by: it is what
+        # says whose session this really is.
+        owner = profile["owner"] or f"{me.get('FirstName')} {me.get('LastName')}"
+        who = f"Acting as {owner} ({me.get('UniqueName')}) in Brightspace."
         _, lp = s.versions()
         for item in s.paged(f"/d2l/api/lp/{lp}/enrollments/myenrollments/", {"orgUnitTypeId": "3"}):
             ou = item.get("OrgUnit") or {}

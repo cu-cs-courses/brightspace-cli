@@ -1514,7 +1514,7 @@ if COOKIES_OK:
         webini.write_text(f"[access]\nteam = test.cloudflareaccess.com\naud = the-aud\nhost = bs.example.test\n"
                           f"certs = http://127.0.0.1:{port}/cdn-cgi/access/certs\n\n"
                           f"[session me]\ncourses = {COURSES}\ndefaults = {DEFAULTS}\n\n"
-                          f"[session other]\ncourses = {theirs}\n\n"
+                          f"[session other]\ncourses = {theirs}\nowner = Bob Smith\n\n"
                           f"[user ada@example.edu]\nsessions = me, other\n\n[user bob@example.edu]\nsessions = other\n")
         proc, wport, first = start_web("--access", str(webini))
         got = fetch(wport, "bs.example.test", "/quizzes", headers=asks())
@@ -1526,6 +1526,12 @@ if COOKIES_OK:
                   fetch(wport, "bs.example.test", "/quizzes?as=other", headers=asks()), 200,
                   has=['<option value="other" selected>other</option>', 'value="shell"'],
                   lacks=['value="120"', "<td>240</td>"])
+        web_check("web behind Access: a session's owner as web.ini names them, beside Brightspace's username",
+                  fetch(wport, "bs.example.test", "/?as=other", headers=asks()), 200,
+                  has=["Acting as Bob Smith (alovelace) in Brightspace."], lacks=["Ada Lovelace"])
+        web_check("web behind Access: a session with no owner given, as Brightspace names them",
+                  fetch(wport, "bs.example.test", "/?as=me", headers=asks()), 200,
+                  has=["Acting as Ada Lovelace (alovelace) in Brightspace."])
         web_check("web behind Access: someone given one session gets no choice",
                   fetch(wport, "bs.example.test", "/quizzes", headers=asks(dict(good, email="bob@example.edu"))), 200,
                   lacks=['class="as"', 'value="120"'])

@@ -705,6 +705,7 @@ defaults = ~/.config/brightspace/quiz-defaults.yml
 
 [session bob]
 courses = ~/.config/brightspace/bob-courses.ini
+owner = Bob Smith
 
 [user ada@example.edu]
 sessions = ada, bob
@@ -716,6 +717,11 @@ sessions = bob
 A session's `defaults` is `quiz-defaults-<name>.yml` beside `web.ini` when left
 out, so two people's never mix. A form names the session it was filled in for,
 and one not given to whoever sent it is refused.
+
+A session's `owner` is what the header calls the person whose session it is,
+for someone who goes by a name Brightspace does not have; left out, it is
+Brightspace's first and last name. The username beside it is Brightspace's
+either way, since that is what says whose session it is.
 
 `team` and `aud` are the Access application's, and any hostname it protects
 shows both: Access sends a visitor to
