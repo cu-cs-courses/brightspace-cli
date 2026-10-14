@@ -699,12 +699,41 @@ run("submissions", "same", "555", "--download", ok=False, has=["same has no drop
 files = sorted(str(p.relative_to(out / "j")) for p in (out / "j").rglob("*.html")); print("   ", files)
 fails += not any(re.fullmatch(r"100001-7001 - Rita-Solberg/My journal-Sep 24, 2026 145 PM\.html", f) for f in files)
 fails += not any(f.startswith("100002-7001 - Tomas-Weber/My journal-") for f in files)
+# Its index.html, as the Download button writes one: a row per student, "Last,
+# First" from the classlist, alphabetical; under each, the entries newest first,
+# the text under Comments: and the time under Submitted:; all of it ASCII.
+index = (out / "j" / "index.html").read_bytes()
+try:
+    page = index.decode("ascii")
+except UnicodeDecodeError:
+    page = ""; fails += 1; print("FAIL index.html is not ASCII")
+heads = re.findall(r"<font color=white><b>(.*?)</b>", page); print("   ", heads)
+fails += heads != ["Solberg, Rita", "Weber, Tomas"]
+rita = page.split("Solberg, Rita")[-1].split("Weber, Tomas")[0]
+fails += not ("The <b>loop</b> part" in rita and "old entry" in rita and rita.index("The <b>loop</b> part") < rita.index("old entry"))
+fails += "My journal-Sep 24, 2026 145 PM<p style='margin-top:3px;'><b>Comments:</b><br><p>old entry</p>" not in page
+fails += "<b>Submitted:</b><br>Sep 24, 2026 1:45 PM</td>" not in page
+fails += not page.startswith("<html>\r\n<body bgcolor=white>\r\n<table width=440")
+# One made from the files afterwards, for a download that had none, is the same page.
+(out / "j" / "index.html").unlink()
+run("index", "240", str(out / "j"), has=["index.html, 3 entries from 2 students"])
+fails += (out / "j" / "index.html").read_bytes() != index
+run("index", "240", str(out / "j"), has=["has an index.html already, left alone"])
+# A student the classlist does not name is named from the folder.
+(out / "k" / "999-7001 - Jo-Park").mkdir(parents=True)
+(out / "k" / "999-7001 - Jo-Park" / "My journal-Sep 24, 2026 145 PM.html").write_text("<html><body><p>hi</p></body></html>")
+run("index", "240", str(out / "k"), str(out / "nothing-here"), has=["index.html, 1 entries from 1 students", "no Journal entries in it"])
+fails += "<b>Park, Jo</b>" not in (out / "k" / "index.html").read_text()
 run("journal", "240", "--on", "2026-09-24", "--no-write", has=["1 entries from 1 students, on 2026-09-24"], lacks=["Finished the drills"])
 run("submissions", "240", "assignment 4", has=["Tomas Weber", "submitted", "table.c, Makefile", "95", "due 2026-09-23 23:59"])
 run("submissions", "240", "nothing like it", ok=False, has=["no entries match"])
 run("submissions", "240", "555", "--out", str(out / "s"), has=["2 files under"])
-got = {p.name: p.read_bytes() for p in (out / "s").rglob("*") if p.is_file()}; print("   ", {k: v[:12] for k, v in got.items()})
+got = {p.name: p.read_bytes() for p in (out / "s").rglob("*") if p.is_file() and p.name != "index.html"}; print("   ", {k: v[:12] for k, v in got.items()})
 fails += got != {"table.c": FILES["1"], "Makefile": FILES["2"]}
+# An assignment's index has a row per file, the file's name where an entry's goes.
+page = (out / "s" / "index.html").read_text()
+fails += re.findall(r"<font color=white><b>(.*?)</b>", page) != ["Weber, Tomas"]
+fails += not all(f"<td width=80% valign=top>{name}<p style='margin-top:3px;'><b>Comments:</b>" in page for name in ("table.c", "Makefile"))
 fails += not (out / "s" / "100002-555 - Tomas-Weber").is_dir()
 run("quizzes", "240", has=["1   Quiz 1  active", "2   Quiz 2"])
 t = run("quizzes", "240"); row = [l for l in t.splitlines() if l.startswith("1 ")][0]; print("   ", row)

@@ -858,6 +858,54 @@ def dashed(name):
     return re.sub(r"[^\w.-]+", "-", name.strip()).strip("-")
 
 
+# The index.html the Download button puts beside the students' folders, which
+# no route of the API returns: a grey row per student, "Last, First", in the
+# order Brightspace lists them -- alphabetical with punctuation ignored, so an
+# apostrophe in a name does not move it, as all seventeen web downloads of the
+# Journal read on 2026-10-14 have it -- and under it a row per entry, newest first: its
+# name, its text under Comments:, and when under Submitted:. An assignment's
+# has a row per file instead, its name where an entry's goes. Artem,
+# 2026-10-14, of the downloads made through the API, which had none: "I found
+# index.html that lists every answer extremely helpful."
+INDEX_HEAD = ("<html>\r\n<body bgcolor=white>\r\n<table width=440 cellpadding=1 cellspacing=0 border=0>\r\n"
+              "<tr><td bgcolor=black>\r\n<table WIDTH=100% cellpadding=3 cellspacing=0 border=0 bgcolor=white>\r\n")
+INDEX_TAIL = "</table></td></tr>\r\n</table>\r\n</body>\r\n</html>\r\n"
+
+
+def last_first(name):
+    """\"Rita Solberg\" as the index writes it, \"Solberg, Rita\": for a student
+    the classlist does not name."""
+    first, _, last = name.strip().rpartition(" ")
+    return f"{last}, {first}" if first else last
+
+
+def classlist_names(s, ou):
+    """Each student's user id and name as the index writes it, \"Last, First\";
+    nothing when the classlist cannot be read."""
+    try:
+        return {str(u.get("Identifier")): f"{u.get('LastName', '')}, {u.get('FirstName', '')}".strip(", ")
+                for u in classlist_students(s, ou)}
+    except Failed:
+        return {}
+
+
+def write_index(out, students):
+    """index.html in a download. `students` maps a user id to the student's
+    name, "Last, First", and their rows: (entry or file name, text as HTML,
+    when submitted)."""
+    rows = []
+    for name, entries in sorted(students.values(), key=lambda st: re.sub(r"[^a-z0-9, ]", "", st[0].lower())):
+        rows.append(f"<tr bgcolor=#AAAAAA><td colspan=2><font color=white><b>{html.escape(name, False)}</b></td></tr>")
+        for entry, text, when in sorted(entries, key=lambda e: e[2], reverse=True):
+            stamp = f"{when:%b} {when.day}, {when.year} {int(when.strftime('%I'))}:{when:%M} {when:%p}"
+            rows.append(f"<tr bgcolor=white><td width=80% valign=top>{html.escape(entry, False)}"
+                        f"<p style='margin-top:3px;'><b>Comments:</b><br>{text}</td>"
+                        f"<td valign=top><b>Submitted:</b><br>{stamp}</td></tr>")
+    # In ASCII, every other character a reference: the page names no charset,
+    # and a browser opening it from disk would guess one and garble the rest.
+    (out / "index.html").write_bytes((INDEX_HEAD + "".join(rows) + INDEX_TAIL).encode("ascii", "xmlcharrefreplace"))
+
+
 def strip_html(h):
     text = re.sub(r"<br\s*/?>|</p>|</div>|</li>", "\n", h, flags=re.I)
     text = re.sub(r"<[^>]+>", "", text)
@@ -1485,13 +1533,22 @@ def cmd_submissions(args):
         out = crs.dropbox / "submissions" / f"{f['Name']} API {d2l_stamp(dt.datetime.now())}"
     else:
         raise Failed(f"{args.course} has no dropbox in {COURSES_FILE} to write under; pass --out")
-    n = 0
+    n, names, students = 0, classlist_names(s, ou), {}
     for e in subs:
         ent, ss = e.get("Entity") or {}, e.get("Submissions") or []
         picked = ss if args.every else ([max(ss, key=lambda x: x.get("SubmissionDate") or "")] if ss else [])
+        uid = str(ent.get("EntityId"))
         for sub in picked:
-            n += len(download(s, ou, f["Id"], sub, student_dir(out, ent.get("EntityId"), f["Id"], ent.get("DisplayName", "?"))))
+            got = download(s, ou, f["Id"], sub, student_dir(out, ent.get("EntityId"), f["Id"], ent.get("DisplayName", "?")))
+            n += len(got)
+            when = local_dt(sub.get("SubmissionDate")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+            text = (sub.get("Comment") or {}).get("Html") or ""
+            rows = students.setdefault(uid, (names.get(uid) or last_first(ent.get("DisplayName", "?")), []))[1]
+            rows.extend((path.name, text, when) for path in got)
     print(f"{n} files under {out}")
+    if students:
+        write_index(out, students)
+        print(f"index.html beside them, {len(students)} students")
 
 
 def cmd_journal(args):
@@ -1527,14 +1584,51 @@ def cmd_journal(args):
     else:
         raise Failed(f"{args.course} has no dropbox in {COURSES_FILE} to write under; "
                      "pass --out or --no-write")
-    n = 0
+    n, names, students = 0, classlist_names(s, ou), {}
     for when, name, uid, sub in picked:
         into = student_dir(out, uid, f["Id"], name)
         into.mkdir(parents=True, exist_ok=True)
+        text = (sub.get("Comment") or {}).get("Html") or ""
         page = into / f"{f['Name']}-{d2l_stamp(when)}.html"
-        page.write_text(f"<html><body>{(sub.get('Comment') or {}).get('Html') or ''}</body></html>")
+        page.write_text(f"<html><body>{text}</body></html>")
         n += 1 + len(download(s, ou, f["Id"], sub, into))
+        students.setdefault(str(uid), (names.get(str(uid)) or last_first(name), []))[1].append((page.stem, text, when))
+    write_index(out, students)
+    # This line's form is read by fetch.py, which takes the path off its end.
     print(f"{n} files under {out}")
+    print(f"index.html beside them, {len(students)} students")
+
+
+def cmd_index(args):
+    """index.html for Journal downloads made before brightspace.py wrote one,
+    built from their files: each student's folder, each entry's page, its time
+    off the page's name, which is the minute the index shows."""
+    s, ou, _ = course(args)
+    names = classlist_names(s, ou)
+    for d in args.dirs:
+        out = pathlib.Path(d)
+        if (out / "index.html").exists():
+            print(f"{out}: has an index.html already, left alone")
+            continue
+        students = {}
+        for folder in sorted(p for p in out.iterdir() if p.is_dir()) if out.is_dir() else []:
+            m = re.fullmatch(r"(\d+)-\d+ - (.+)", folder.name)
+            if not m:
+                continue
+            for page in folder.glob("*.html"):
+                when = re.fullmatch(r".+-([A-Z][a-z]{2} \d{1,2}, \d{4}) (\d{1,2})(\d{2}) ([AP]M)", page.stem)
+                if not when:
+                    continue
+                at = dt.datetime.strptime(f"{when.group(1)} {when.group(2)}:{when.group(3)} {when.group(4)}",
+                                          "%b %d, %Y %I:%M %p")
+                body = re.search(r"<body>(.*)</body>", page.read_text(errors="replace"), re.S)
+                students.setdefault(m.group(1), (names.get(m.group(1)) or last_first(m.group(2).replace("-", " ")), []))[1] \
+                    .append((page.stem, body.group(1) if body else "", at))
+        if not students:
+            print(f"{out}: no Journal entries in it to index")
+            continue
+        write_index(out, students)
+        print(f"{out}: index.html, {sum(len(r) for _, r in students.values())} entries from {len(students)} students")
 
 
 def cmd_quizzes(args):
@@ -3890,6 +3984,8 @@ def main(argv=None):
     x.add_argument("--all", action="store_true", help="every entry ever")
     x.add_argument("--out", help="save under this directory instead of the course's dropbox, in journals/")
     x.add_argument("--no-write", action="store_true", help="only print")
+    x = with_course("index", cmd_index, help="an index.html, as the Download button writes, for Journal downloads made without one")
+    x.add_argument("dirs", nargs="+", metavar="DIR", help="a download: the directory holding the students' folders")
     with_course("quizzes", cmd_quizzes, help="each quiz with its attempt counts")
     with_course("quiz", cmd_quiz, help="one quiz's settings: IP restriction, password, dates, attempts").add_argument(
         "quiz", help="the quiz's name (or enough of it), or its id")

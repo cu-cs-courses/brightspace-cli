@@ -36,6 +36,7 @@ Python 3.11 or newer; the suite runs on 3.11 and 3.13.
     ./brightspace.py folders 240            the entries: id, name, due, hidden, who has handed in
     ./brightspace.py journal 240            today's Journal entries, printed and saved
     ./brightspace.py submissions 240 'Assignment 4' --download
+    ./brightspace.py index 240 DIR...       an index.html for a Journal download made without one
     ./brightspace.py quizzes 240            each quiz with how many took one attempt and two
     ./brightspace.py quiz 240 'Midterm Part 1'   one quiz's settings, IP restriction included
     ./brightspace.py classlist 240
@@ -335,6 +336,20 @@ for a text entry or the files handed in, under the course's
 `dropbox/journals/` or `dropbox/submissions/` — so a dump made here reads like
 one made by hand, and nothing lands in a repo. `journal` takes today by default;
 `--on`, `--since` and `--all` widen it, `--no-write` only prints.
+
+**And an `index.html` beside the students' directories**, which is the page
+worth opening: every student, `Last, First`, and under each name every entry,
+newest first, with its text and the minute it came in, on one page. The
+Download button writes it into its zip, and no route of the API returns one, so
+the tool writes its own from what it downloaded, as the button lays it out:
+the same table, students in the same order (alphabetical with punctuation
+ignored), names from the classlist. An assignment's has a row per file. Set
+beside the button's own on the same days' entries on 2026-10-14, the students,
+their order, the entries and the times were the same, and the text differed
+only in `<br/>` against `<br>`. Every character outside ASCII is written as a
+reference, since the page names no charset. `index <course> DIR...` gives a
+Journal download made before this one, from its files alone; it leaves a
+directory that has an `index.html` alone.
 
 **What `quiz` is for.** A quiz that carries an exam has settings that are wrong
 in ways the UI does not show you at a glance: an IP restriction that does not
