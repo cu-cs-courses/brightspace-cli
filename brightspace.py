@@ -1689,8 +1689,8 @@ def cmd_quiz(args):
         ("starts", local(q.get("StartDate")) or "no start date"),
         ("ends", local(q.get("EndDate")) or "no end date"),
         ("due", local(q.get("DueDate")) or "no due date"),
-        ("time limit", (q.get("SubmissionTimeLimit") or {}).get("TimeLimitValue")
-                       if isinstance(q.get("SubmissionTimeLimit"), dict) else q.get("SubmissionTimeLimit")),
+        ("time limit", (lambda on, m: f"{m} minutes" if on else "none")(*limit_of(
+                           q.get("SubmissionTimeLimit") if isinstance(q.get("SubmissionTimeLimit"), dict) else None))),
         ("grade item", q.get("GradeItemId") or "not attached to the gradebook"),
         ("category", q.get("CategoryId") or "none"),
         ("shuffled", yes_no(q.get("Shuffle"))),
@@ -2270,6 +2270,13 @@ def cmd_set_quiz(args):
                  + [("questions", questions, len(quiz_questions(s, ou, before["QuizId"])))])
 
 
+def no_limit(minutes):
+    """Whether --minutes, or a file's `minutes:`, says none: a quiz with no time
+    limit, which a course's quiz defaults would otherwise put one on. An exam
+    is the case: E1 ran with none, and its 120 defaults say 8 minutes."""
+    return minutes is not None and str(minutes).strip().lower() == "none"
+
+
 def limit_of(limit):
     """A quiz's time limit as (enforced, minutes), whichever shape it comes in."""
     limit = limit or {}
@@ -2346,7 +2353,13 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
     # enforced or not, as read. --minutes defaulted to 50 until 2026-10-01, so a
     # quiz copied from Midterm Part 1, which has no timer, came out with an
     # enforced fifty minutes and a clock nobody asked for.
-    if args.minutes is not None:
+    if no_limit(args.minutes):
+        # No timer, whatever the template had: the value stays, since the API
+        # wants one, and IsEnforced off is what "no time limit" is on the server.
+        had = payload.get("SubmissionTimeLimit") if isinstance(payload.get("SubmissionTimeLimit"), dict) else {}
+        payload["SubmissionTimeLimit"] = {"IsEnforced": False, "ShowClock": False,
+                                          "TimeLimitValue": int((had or {}).get("TimeLimitValue") or 120)}
+    elif args.minutes is not None:
         payload["SubmissionTimeLimit"] = {"IsEnforced": True, "ShowClock": True,
                                           "TimeLimitValue": int(args.minutes)}
     if args.ip:
@@ -3047,8 +3060,11 @@ def time_of_day(text):
 
 def check_value(key, value, at):
     """Refuse a value a quiz's key, or a default's, cannot take."""
+    if key == "minutes" and no_limit(value):
+        return
     if key in ("minutes", "attempts") and not re.fullmatch(r"[1-9]\d*", value):
-        raise Failed(f"{at} {key}: is a whole number, not {value!r}")
+        raise Failed(f"{at} {key}: is a whole number, not {value!r}"
+                     + (" -- or none, for a quiz with no time limit" if key == "minutes" else ""))
     if key == "points" and not re.fullmatch(r"\d+(\.\d+)?", value):
         raise Failed(f"{at} points: is a number, not {value!r}")
     if key == "ip" and not re.fullmatch(r"[\d.]+\s*-\s*[\d.]+", value):
@@ -3224,7 +3240,8 @@ def quiz_summary(plan, template=None):
     has = (f"{plan['questions']} questions from {plan['path'].name}, worth {plan['worth']:g}"
            if plan["path"] else "its questions written in Brightspace")
     when = (f"opens {plan.get('start', 'with no start date')}, closes {plan.get('end', 'with no end date')}; "
-            + ", ".join(x for x in (nums("minutes", "minute") or "the time limit of the quiz it copies",
+            + ", ".join(x for x in (("no time limit" if no_limit(plan.get("minutes")) else nums("minutes", "minute"))
+                                    or "the time limit of the quiz it copies",
                                     nums("attempts", "attempt") or "1 attempt") if x))
     copied = f"settings copied from {template!r}" if template else (
         f"settings copied from {plan['like']!r}" if plan.get("like") not in (None, "previous")
@@ -3292,9 +3309,12 @@ def check_quiz(s, ou, plan):
             row(what, want or "(none)", local(q.get(field)) or "(none)",
                 (local_to_utc(want) if want else None) == q.get(field))
         on, minutes = limit_of(q.get("SubmissionTimeLimit"))
-        row("time limit", f"{plan['minutes']} minutes" if "minutes" in plan else "-",
-            f"{minutes} minutes" if on else "(none)",
-            "minutes" not in plan or (on and str(minutes) == plan["minutes"]))
+        if no_limit(plan.get("minutes")):
+            row("time limit", "(none)", f"{minutes} minutes" if on else "(none)", not on)
+        else:
+            row("time limit", f"{plan['minutes']} minutes" if "minutes" in plan else "-",
+                f"{minutes} minutes" if on else "(none)",
+                "minutes" not in plan or (on and str(minutes) == plan["minutes"]))
         row("attempts", plan.get("attempts", "1"),
             str((q.get("AttemptsAllowed") or {}).get("NumberOfAttemptsAllowed")))
         ips = [f"{r.get('IPRangeStart')}-{r.get('IPRangeEnd')}" for r in q.get("RestrictIPAddressRange") or []]
@@ -4009,7 +4029,7 @@ def main(argv=None):
     x.add_argument("name")
     x.add_argument("--start", help="local time, '2026-09-29 12:30'")
     x.add_argument("--end", help="local time, '2026-09-29 13:25'")
-    x.add_argument("--minutes", help="enforced time limit; without it, --like's limit is kept as it is")
+    x.add_argument("--minutes", help="enforced time limit, or none for no timer; without it, --like's limit is kept as it is")
     x.add_argument("--attempts", default=1)
     x.add_argument("--ip", help="allowed range, '148.137.150.0-148.137.150.255'")
     x.add_argument("--password")
@@ -4086,7 +4106,8 @@ def main(argv=None):
     x.add_argument("--date", metavar="YYYY-MM-DD", help="the day it runs, for a start and end given as times of day")
     x.add_argument("--start", help="'14:00' on --date, or '2026-10-12 14:00'")
     x.add_argument("--end", help="'15:29' on --date, or '2026-10-12 15:29'")
-    x.add_argument("--minutes", help="enforced time limit; without it, the copied quiz's")
+    x.add_argument("--minutes", help="enforced time limit, or none for no timer; without it, the copied quiz's, "
+                                     "unless the course's defaults say otherwise")
     x.add_argument("--attempts")
     x.add_argument("--points", help="what its grade item is out of")
     x.add_argument("--like", help="the quiz to copy the settings from (default: the one numbered before it)")
