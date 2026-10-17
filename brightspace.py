@@ -2083,14 +2083,15 @@ def name_words(text):
 def refuse_student_names(s, ou, what, *texts):
     """Stop before a student's name reaches anything this makes or renames.
 
-    A quiz's, a grade item's or a folder's name, description and header are the
-    course's: they show in its lists, in the calendar, in the notification
-    emails Brightspace sends when one is made or changed, and on every page of
-    a quiz. Artem, 2026-10-17, when a make-up quiz named for its one student
-    reached his inbox the moment it was made, hidden as it was: "You must not
-    create anything with names public." One student's sitting is kept theirs by
-    special access, never by its name. Any classlist student's first or last
-    name, as a word, stops the command before anything is sent.
+    A quiz's, a grade item's or a folder's name, description and header go
+    wherever Brightspace shows the course its activities, and once, unasked,
+    into a notification email: a make-up quiz named for its one student was
+    emailed the moment it was made, hidden and inactive, where an earlier quiz
+    named the same way sent nothing. Which setting did it is not known, so names
+    stay off activities altogether, and the question does not arise. One
+    student's sitting is kept theirs by special access, never by its name. Any
+    classlist student's first or last name, as a word, stops the command before
+    anything is sent.
     """
     words = set()
     for u in classlist_students(s, ou):
@@ -2099,9 +2100,9 @@ def refuse_student_names(s, ou, what, *texts):
     for text in texts:
         found = sorted(name_words(text) & words)
         if found:
-            raise Failed(f"{what} would carry a student's name ({', '.join(found)}), and what is made here "
-                         "is shown to the whole course: its lists, its calendar and its emails. Name the "
-                         "thing, not the student; a sitting for one student is theirs by special access")
+            raise Failed(f"{what} would carry a student's name ({', '.join(found)}): no names on activities, "
+                         "since Brightspace has emailed one. Name the thing, not the student; a sitting for "
+                         "one student is theirs by special access")
 
 
 def student_named(students, who):

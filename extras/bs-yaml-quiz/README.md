@@ -152,7 +152,7 @@ Whatever the block leaves out comes from the course's quiz defaults, a file of
 blocks in these same keys, and `setup-quiz` takes each key as a flag too;
 brightspace-cli's README has both.
 
-**No student's name in a name, a description or a header.** Those are the course's: its lists, its calendar and the emails Brightspace sends when a quiz is made. `setup-quiz`, `new-quiz`, `set-quiz`, `new-item` and `new-folder` refuse any classlist student's first or last name; a sitting for one student is theirs by `special_access_only`, never by its name.
+**No student's name in a name, a description or a header.** Brightspace once emailed a hidden quiz's name the moment it was made, for a reason not pinned down, so names stay off activities altogether: `setup-quiz`, `new-quiz`, `set-quiz`, `new-item` and `new-folder` refuse any classlist student's first or last name, and a sitting for one student is theirs by `special_access_only`, never by its name.
 
 The quiz is made hidden, to be shown once its questions are in. Those go in by
 hand, from the CSV, since no API route creates a question; `setup-quiz` ends
