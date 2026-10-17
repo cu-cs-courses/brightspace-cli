@@ -2008,6 +2008,7 @@ def cmd_new_item(args):
     Measured in the 120 Devshell on 2026-09-27: the folder's GradeItemId follows.
     """
     s, ou, _ = course(args)
+    refuse_student_names(s, ou, f"the grade item {args.name!r}", args.name)
     le, _ = s.versions()
     if any(g["Name"].strip().lower() == args.name.strip().lower() for g in grade_items(s, ou)):
         raise Failed(f"a grade item called {args.name!r} already exists")
@@ -2064,6 +2065,43 @@ def classlist_students(s, ou):
     le, _ = s.versions()
     return [u for u in s.api(f"/d2l/api/le/{le}/{ou}/classlist/")
             if re.search(r"student|learner", u.get("ClasslistRoleDisplayName") or "", re.I)]
+
+
+NAME_WORD = re.compile(r"[A-Za-z][A-Za-z'\u2019-]*[A-Za-z]")
+
+
+def name_words(text):
+    """The words a name check compares: each word, and each part of a hyphened
+    or an apostrophed one, lowercased, three letters or more."""
+    out = set()
+    for w in NAME_WORD.findall(str(text or "").lower()):
+        out.add(w)
+        out.update(p for p in re.split(r"[-'\u2019]", w) if p)
+    return {w for w in out if len(w) >= 3}
+
+
+def refuse_student_names(s, ou, what, *texts):
+    """Stop before a student's name reaches anything this makes or renames.
+
+    A quiz's, a grade item's or a folder's name, description and header are the
+    course's: they show in its lists, in the calendar, in the notification
+    emails Brightspace sends when one is made or changed, and on every page of
+    a quiz. Artem, 2026-10-17, when a make-up quiz named for its one student
+    reached his inbox the moment it was made, hidden as it was: "You must not
+    create anything with names public." One student's sitting is kept theirs by
+    special access, never by its name. Any classlist student's first or last
+    name, as a word, stops the command before anything is sent.
+    """
+    words = set()
+    for u in classlist_students(s, ou):
+        for key in ("FirstName", "LastName"):
+            words |= name_words(u.get(key))
+    for text in texts:
+        found = sorted(name_words(text) & words)
+        if found:
+            raise Failed(f"{what} would carry a student's name ({', '.join(found)}), and what is made here "
+                         "is shown to the whole course: its lists, its calendar and its emails. Name the "
+                         "thing, not the student; a sitting for one student is theirs by special access")
 
 
 def student_named(students, who):
@@ -2224,6 +2262,12 @@ def cmd_set_quiz(args):
         changed["Shuffle"] = args.shuffle
     if args.auto_publish is not None:
         changed["IsAutoSetGraded"] = args.auto_publish
+    if args.password is not None:
+        changed["Password"] = args.password
+    if args.calendar is not None:
+        changed["DisplayInCalendar"] = args.calendar
+    if args.special_access_only is not None:
+        changed["AllowOnlyUsersWithSpecialAccess"] = args.special_access_only
     if args.header is not None:
         # The header shows above every page of the quiz: the resources allowed
         # and the mechanics, which is where E1 put them. An HTML file, kept in
@@ -2243,6 +2287,9 @@ def cmd_set_quiz(args):
                if k == "Header" or before.get(k) != v}
     if not changed:
         raise Failed("nothing to change: the quiz already has those values, or none were named")
+    refuse_student_names(s, ou, f"quiz {before.get('Name')!r}'s new name, header or password", changed.get("Name"),
+                         pathlib.Path(args.header).read_text(encoding="utf-8") if args.header else None,
+                         changed.get("Password"))
     payload |= changed
     labels = {"IsAutoSetGraded": "auto-publish attempt results", "Header": "header"}
     print(f"{before['Name']!r} (id {before['QuizId']})")
@@ -2314,6 +2361,7 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
     quiz to copy, read in the course template_from names when that is another.
     The quiz, or None."""
     s, ou, _ = course(args)
+    refuse_student_names(s, ou, f"the quiz {args.name!r}", args.name, description, args.password)
     le, _ = s.versions()
     quizzes = list(s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/"))
     if any(q["Name"].strip().lower() == args.name.strip().lower() for q in quizzes):
@@ -2353,6 +2401,12 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
     # enforced or not, as read. --minutes defaulted to 50 until 2026-10-01, so a
     # quiz copied from Midterm Part 1, which has no timer, came out with an
     # enforced fifty minutes and a clock nobody asked for.
+    # Out of the calendar, and seen only by those given special access in the
+    # UI: a sitting for one student is made that way, so that there is no moment
+    # at which the course can see it.
+    for flag, field in (("calendar", "DisplayInCalendar"), ("special_access_only", "AllowOnlyUsersWithSpecialAccess")):
+        if as_flag(getattr(args, flag, None)) is not None:
+            payload[field] = as_flag(getattr(args, flag))
     if no_limit(args.minutes):
         # No timer, whatever the template had: the value stays, since the API
         # wants one, and IsEnforced off is what "no time limit" is on the server.
@@ -2406,6 +2460,9 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
         ("time limit", limit_of(payload.get("SubmissionTimeLimit")), limit_of(back.get("SubmissionTimeLimit"))),
         ("IP range", ips(payload["RestrictIPAddressRange"]), ips(back.get("RestrictIPAddressRange"))),
         ("password", bool(args.password), bool(back.get("Password"))),
+        ("calendar", payload.get("DisplayInCalendar"), back.get("DisplayInCalendar")),
+        ("special access only", payload.get("AllowOnlyUsersWithSpecialAccess"),
+         back.get("AllowOnlyUsersWithSpecialAccess")),
         ("grade item", payload["GradeItemId"], back.get("GradeItemId"))]
         + ([("description", *text_pair(description, text_of((back.get("Description") or {}).get("Text"))))]
            if description else []))
@@ -2625,6 +2682,7 @@ def cmd_new_folder(args):
     second copy inside Brightspace is a copy that goes stale.
     """
     s, ou, _ = course(args)
+    refuse_student_names(s, ou, f"the folder {args.name!r}", args.name)
     le, _ = s.versions()
     # setup calls this with arguments it builds itself, which carry neither.
     instructions = getattr(args, "instructions", None)
@@ -3019,7 +3077,7 @@ def cmd_setup(args):
 
 # A quiz's keys: its brightspace: block, and setup-quiz's flags of the same names.
 QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
-             "points", "grade_item", "description", "shell")
+             "points", "grade_item", "description", "shell", "calendar", "special_access_only")
 # A course's defaults: a quiz's keys but the first three, start and end as times
 # of day, and two for a course taught as several sections: which they are, and
 # the grade item each section's copy is shaped like where it has none of the
@@ -3058,6 +3116,16 @@ def time_of_day(text):
     return f"{int(m.group(1)):02d}:{m.group(2)}" if m and int(m.group(1)) < 24 and int(m.group(2)) < 60 else None
 
 
+TRUTH, FALSITY = {"true", "yes", "on"}, {"false", "no", "off"}
+
+
+def as_flag(value):
+    """A block's true or false, or a flag's, as a bool; None when not given."""
+    if value is None or isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in TRUTH
+
+
 def check_value(key, value, at):
     """Refuse a value a quiz's key, or a default's, cannot take."""
     if key == "minutes" and no_limit(value):
@@ -3065,6 +3133,8 @@ def check_value(key, value, at):
     if key in ("minutes", "attempts") and not re.fullmatch(r"[1-9]\d*", value):
         raise Failed(f"{at} {key}: is a whole number, not {value!r}"
                      + (" -- or none, for a quiz with no time limit" if key == "minutes" else ""))
+    if key in ("calendar", "special_access_only") and value.strip().lower() not in TRUTH | FALSITY:
+        raise Failed(f"{at} {key}: is true or false, not {value!r}")
     if key == "points" and not re.fullmatch(r"\d+(\.\d+)?", value):
         raise Failed(f"{at} points: is a number, not {value!r}")
     if key == "ip" and not re.fullmatch(r"[\d.]+\s*-\s*[\d.]+", value):
@@ -3179,7 +3249,7 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     else:
         plan["item"] = True
     plan["used"] = used
-    for key in ("date", "minutes", "attempts", "points", "ip"):
+    for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only"):
         if key in plan:
             check_value(key, plan[key], at)
     day = plan.get("date")
@@ -3308,6 +3378,10 @@ def check_quiz(s, ou, plan):
             want = plan.get(key)
             row(what, want or "(none)", local(q.get(field)) or "(none)",
                 (local_to_utc(want) if want else None) == q.get(field))
+        for key, field in (("calendar", "DisplayInCalendar"), ("special_access_only", "AllowOnlyUsersWithSpecialAccess")):
+            if key in plan:
+                row(key.replace("_", " "), str(as_flag(plan[key])).lower(), str(bool(q.get(field))).lower(),
+                    as_flag(plan[key]) == bool(q.get(field)))
         on, minutes = limit_of(q.get("SubmissionTimeLimit"))
         if no_limit(plan.get("minutes")):
             row("time limit", "(none)", f"{minutes} minutes" if on else "(none)", not on)
@@ -3440,6 +3514,7 @@ def cmd_setup_quiz(args):
     make_quiz(argparse.Namespace(**common, like=None, start=plan.get("start"), end=plan.get("end"),
                                  minutes=plan.get("minutes"), attempts=plan.get("attempts", "1"),
                                  ip=plan.get("ip"), password=plan.get("password"), grade_item=attach,
+                                 calendar=plan.get("calendar"), special_access_only=plan.get("special_access_only"),
                                  active=False),
               description=plan.get("description_html"), template=template,
               template_from=from_label if from_ou != ou else None,
@@ -4038,6 +4113,10 @@ def main(argv=None):
                    help="read --like's quiz in this course instead: 230, for a sandbox with no quiz of its own")
     x.add_argument("--grade-item", dest="grade_item", help="attach this grade item, by name or id")
     x.add_argument("--active", action="store_true", help="visible to students immediately")
+    x.add_argument("--calendar", action=argparse.BooleanOptionalAction,
+                   help="show its dates in the course calendar; without it, --like's setting")
+    x.add_argument("--special-access-only", dest="special_access_only", action=argparse.BooleanOptionalAction,
+                   help="only users given special access in the UI see it; without it, --like's setting")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the payload and stop")
 
     x = with_course("new-folder", cmd_new_folder, help="create an assignment folder students hand in to")
@@ -4062,6 +4141,11 @@ def main(argv=None):
     x.add_argument("--auto-publish", dest="auto_publish", action=argparse.BooleanOptionalAction,
                    help="publish attempt results immediately upon completion (IsAutoSetGraded)")
     x.add_argument("--header", metavar="FILE", help="an HTML file to show above every page of the quiz")
+    x.add_argument("--password", help="the password a student types to start it; it goes on the whiteboard")
+    x.add_argument("--calendar", action=argparse.BooleanOptionalAction,
+                   help="show the quiz's dates in the course calendar (DisplayInCalendar)")
+    x.add_argument("--special-access-only", dest="special_access_only", action=argparse.BooleanOptionalAction,
+                   help="only users given special access in the UI see the quiz (AllowOnlyUsersWithSpecialAccess)")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the change and stop")
     x = with_course("new-item", cmd_new_item, help="create a grade item, shaped like a named one")
     x.add_argument("name")

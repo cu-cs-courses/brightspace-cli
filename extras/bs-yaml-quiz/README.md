@@ -144,11 +144,15 @@ brightspace:
 | `points` | What its grade item is out of, when one is made. The copied item's when left out. |
 | `grade_item` | `none` for no grade item. Left out, the quiz goes to an item of its own name, made like the one `like` sends its scores to if there is none yet. |
 | `description` | What students read before they start, in Markdown, as a question's text is. |
+| `calendar` | `false` keeps its dates out of the course calendar. The copied quiz's when left out. |
+| `special_access_only` | `true` shows it only to users given special access, which the UI adds. For a sitting meant for one student: made this way, there is no moment at which the course sees it. |
 | `shell` | Make it in this empty shell, to copy into the course's sections afterwards. |
 
 Whatever the block leaves out comes from the course's quiz defaults, a file of
 blocks in these same keys, and `setup-quiz` takes each key as a flag too;
 brightspace-cli's README has both.
+
+**No student's name in a name, a description or a header.** Those are the course's: its lists, its calendar and the emails Brightspace sends when a quiz is made. `setup-quiz`, `new-quiz`, `set-quiz`, `new-item` and `new-folder` refuse any classlist student's first or last name; a sitting for one student is theirs by `special_access_only`, never by its name.
 
 The quiz is made hidden, to be shown once its questions are in. Those go in by
 hand, from the CSV, since no API route creates a question; `setup-quiz` ends
