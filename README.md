@@ -375,7 +375,7 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py setup-quiz quizzes/q5-pointers/q5-pointers.yml [--go|--check]
     ./brightspace.py setup-quiz --course 120 --name 'Quiz 6' --date 2026-10-12 [--go|--check]
     ./brightspace.py setup-quiz --course 115 --shell 115-shell --name 'Quiz 3' --date 2026-10-12 [--go]
-    ./brightspace.py quiz-defaults 120 --set start=14:00 --set end=15:29 --set minutes=8
+    ./brightspace.py quiz-defaults 120 --set start=14:00 --set end=15:50 --set minutes=8
     ./brightspace.py set-folder 240 'Assignment 5' --show [--submissions keep-all]
     ./brightspace.py grade 240 Presentation --max 'Ada Lovelace' 'Alan Turing' [--go]
     ./brightspace.py delete-quiz 230 Untitled --go

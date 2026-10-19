@@ -2265,6 +2265,13 @@ def cmd_set_quiz(args):
         changed["IsAutoSetGraded"] = args.auto_publish
     if args.password is not None:
         changed["Password"] = args.password
+    # A quiz's due date and its end are one moment, as new-quiz makes them: the
+    # end of the class it runs in. Artem, 2026-10-19: "the due date for quizzes
+    # should be end of class."
+    if args.start is not None:
+        changed["StartDate"] = local_to_utc(args.start)
+    if args.end is not None:
+        changed["EndDate"] = changed["DueDate"] = local_to_utc(args.end)
     if args.calendar is not None:
         changed["DisplayInCalendar"] = args.calendar
     if args.special_access_only is not None:
@@ -4143,6 +4150,8 @@ def main(argv=None):
                    help="publish attempt results immediately upon completion (IsAutoSetGraded)")
     x.add_argument("--header", metavar="FILE", help="an HTML file to show above every page of the quiz")
     x.add_argument("--password", help="the password a student types to start it; it goes on the whiteboard")
+    x.add_argument("--start", help="when it opens, local time, '2026-10-19 14:00'")
+    x.add_argument("--end", help="when it closes, and is due, local time, '2026-10-19 15:50'")
     x.add_argument("--calendar", action=argparse.BooleanOptionalAction,
                    help="show the quiz's dates in the course calendar (DisplayInCalendar)")
     x.add_argument("--special-access-only", dest="special_access_only", action=argparse.BooleanOptionalAction,
