@@ -3959,9 +3959,12 @@ def cmd_new_links(args):
     such as an exam desk's own pages. Each link opens in a new window.
 
     Without --go it prints what it would send and sends nothing. It refuses a
-    name a top-level module already has, and reads the module and every topic
-    back once they are made. The module is hidden and so is every topic in it,
-    so that a module shown by mistake still shows a student nothing.
+    name a top-level module already has, unless --replace, which deletes that
+    module first and only if all it holds is link topics; so a module whose
+    links carry a token can be made again when the token changes. It reads the
+    module and every topic back once they are made. The module is hidden and so
+    is every topic in it, so that a module shown by mistake still shows a
+    student nothing.
     """
     name = " ".join((args.module or "").split())
     if not name:
@@ -3986,11 +3989,28 @@ def cmd_new_links(args):
         print(f"  {t['Title']}: {t['Url']}")
     print(f"\n  POST /d2l/api/le/{le}/{ou}/content/root/ " + json.dumps(module))
     print(f"  POST .../content/modules/<its id>/structure/, once for each link")
-    if any(same_name(m.get("Title", ""), name) for m in content_root(s, ou)):
-        raise Failed(f"Content already has a module named {name!r}; nothing has been sent")
+    old = [m for m in content_root(s, ou) if same_name(m.get("Title", ""), name)]
+    if len(old) > 1:
+        raise Failed(f"Content has {len(old)} modules named {name!r}; nothing has been sent")
+    if old and not args.replace:
+        raise Failed(f"Content already has a module named {name!r}; --replace makes it anew. Nothing has been sent")
+    if old:
+        oid = old[0]["Id"]
+        held = s.api(f"/d2l/api/le/{le}/{ou}/content/modules/{oid}/structure/")
+        others = [h.get("Title") for h in held if h.get("Type") != 1 or h.get("TopicType") != 3]
+        if others:
+            raise Failed(f"module {oid}, {name!r}, holds more than links ({', '.join(map(repr, others))}); "
+                         "nothing has been sent")
+        print(f"  replaces module {oid}, which holds {len(held)} link{'' if len(held) == 1 else 's'}: "
+              + ", ".join(repr(h.get("Title")) for h in held))
     if not args.go:
         print("\n  nothing sent; --go makes it")
         return
+    if old:
+        s.send("DELETE", f"/d2l/api/le/{le}/{ou}/content/modules/{oid}", None)
+        if any(m.get("Id") == oid for m in content_root(s, ou)):
+            raise Failed(f"module {oid} is still there after its DELETE; nothing else has been sent")
+        print(f"  deleted module {oid}")
     mid = s.send("POST", f"/d2l/api/le/{le}/{ou}/content/root/", module)["Id"]
     try:
         for t in topics:
@@ -4310,6 +4330,8 @@ def main(argv=None):
     x.add_argument("--module", required=True, help="the module's name")
     x.add_argument("--link", dest="links", nargs=2, action="append", metavar=("TITLE", "URL"),
                    help="a link topic: its title, then its address; once for each")
+    x.add_argument("--replace", action="store_true",
+                   help="delete a module of the same name first, if all it holds is link topics")
     x.add_argument("--go", action="store_true", help="make it; without it, print what would be sent")
 
     x = with_course("delete-quiz", cmd_delete_quiz,

@@ -383,7 +383,7 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py new-checklist 115-01 115-02 115-03 --name 'Week 7' \
         --item 'Read chapter 3' --due '2026-10-13 23:59' --item 'Quiz 6' [--go]
     ./brightspace.py new-links 230 --module 'Exam seats' \
-        --link 'Every seat' 'https://exam.example/desk/all?id=WORD&t=TOKEN' [--go]
+        --link 'Class 15' 'https://exam.example/desk/instructor?id=WORD&t=TOKEN' [--replace] [--go]
 
 Each prints the exact body it is about to send, `--dry-run` stops before
 sending, and after sending **each reads its object back** and prints `checked
@@ -401,7 +401,10 @@ each opening in a new window; every topic is hidden too, so a module shown by
 mistake still shows a student nothing. It was written for an exam desk's
 instructor pages, whose addresses carry a token that belongs nowhere public:
 the addresses go on the command line and to Brightspace, never into a file.
-Rehearsed in a sandbox on 2026-10-20, a query's `&` included.
+`--replace` makes a module of the same name anew, for when the token changes,
+and deletes the old one only if all it holds is link topics. Rehearsed in a
+sandbox on 2026-10-20: made, a query's `&` kept, a second run refused, and
+replaced, the old module confirmed gone.
 
 **`setup` makes an assignment's folder and column with nothing typed.** It
 reads three files in the course's site:
