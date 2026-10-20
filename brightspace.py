@@ -3947,6 +3947,67 @@ def post_checklist(s, ou, name, items):
                  f"made checklist {cid}")
 
 
+def content_root(s, ou):
+    """The course's top-level modules in Content."""
+    le, _ = s.versions()
+    return s.api(f"/d2l/api/le/{le}/{ou}/content/root/")
+
+
+def cmd_new_links(args):
+    """A module in Content, hidden from students, holding one link topic per
+    --link: a place on Brightspace where the instructor keeps addresses at hand,
+    such as an exam desk's own pages. Each link opens in a new window.
+
+    Without --go it prints what it would send and sends nothing. It refuses a
+    name a top-level module already has, and reads the module and every topic
+    back once they are made. The module is hidden and so is every topic in it,
+    so that a module shown by mistake still shows a student nothing.
+    """
+    name = " ".join((args.module or "").split())
+    if not name:
+        raise Failed("the module needs a name: --module")
+    if not args.links:
+        raise Failed("a module needs a link at least: --link TITLE URL")
+    for title, url in args.links:
+        if urllib.parse.urlparse(url).scheme not in ("https", "http"):
+            raise Failed(f"{url!r}, for {title!r}, is not a web address")
+    s, ou, _ = course(args)
+    refuse_student_names(s, ou, f"the module {name!r}", name, *[title for title, _ in args.links])
+    le, _ = s.versions()
+    module = {"Title": name, "ShortTitle": "", "Type": 0, "ModuleStartDate": None, "ModuleEndDate": None,
+              "ModuleDueDate": None, "IsHidden": True, "IsLocked": False, "Description": NO_TEXT}
+    topics = [{"Title": " ".join(title.split()), "ShortTitle": "", "Type": 1, "TopicType": 3, "Url": url,
+               "StartDate": None, "EndDate": None, "DueDate": None, "IsHidden": True, "IsLocked": False,
+               "OpenAsExternalResource": True, "Description": NO_TEXT, "MajorUpdate": None,
+               "MajorUpdateText": "", "ResetCompletionTracking": None}
+              for title, url in args.links]
+    print(f"{name!r}, hidden, in Content, with {len(topics)} link{'' if len(topics) == 1 else 's'}:")
+    for t in topics:
+        print(f"  {t['Title']}: {t['Url']}")
+    print(f"\n  POST /d2l/api/le/{le}/{ou}/content/root/ " + json.dumps(module))
+    print(f"  POST .../content/modules/<its id>/structure/, once for each link")
+    if any(same_name(m.get("Title", ""), name) for m in content_root(s, ou)):
+        raise Failed(f"Content already has a module named {name!r}; nothing has been sent")
+    if not args.go:
+        print("\n  nothing sent; --go makes it")
+        return
+    mid = s.send("POST", f"/d2l/api/le/{le}/{ou}/content/root/", module)["Id"]
+    try:
+        for t in topics:
+            s.send("POST", f"/d2l/api/le/{le}/{ou}/content/modules/{mid}/structure/", t)
+    except Failed as e:
+        raise Failed(f"{e}\n  Module {mid} is there, made in part: delete it in Brightspace before making it again.")
+    print(f"\n  made module {mid}, with {len(topics)} link{'' if len(topics) == 1 else 's'}")
+    got = s.api(f"/d2l/api/le/{le}/{ou}/content/modules/{mid}")
+    kept = s.api(f"/d2l/api/le/{le}/{ou}/content/modules/{mid}/structure/")
+    check_landed([("name", name, got.get("Title")),
+                  ("hidden", True, got.get("IsHidden")),
+                  ("titles", [t["Title"] for t in topics], [k.get("Title") for k in kept]),
+                  ("addresses", [t["Url"] for t in topics], [k.get("Url") for k in kept]),
+                  ("topics hidden", [True] * len(topics), [k.get("IsHidden") for k in kept])],
+                 f"made module {mid}")
+
+
 def cmd_new_checklist(args):
     """A checklist, the same in each of several courses: a name, and items
     written in Markdown, each due at a time of its own or not at all.
@@ -4243,6 +4304,13 @@ def main(argv=None):
                    help="the due date of the --item before it, in this machine's time: '2026-10-13 23:59'")
     x.add_argument("--go", action="store_true", help="post it; without it, check and print what would be sent")
     x.set_defaults(fn=cmd_new_checklist)
+
+    x = with_course("new-links", cmd_new_links, help="a module in Content, hidden from students, of link topics",
+                    description=cmd_new_links.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    x.add_argument("--module", required=True, help="the module's name")
+    x.add_argument("--link", dest="links", nargs=2, action="append", metavar=("TITLE", "URL"),
+                   help="a link topic: its title, then its address; once for each")
+    x.add_argument("--go", action="store_true", help="make it; without it, print what would be sent")
 
     x = with_course("delete-quiz", cmd_delete_quiz,
                     help="delete a quiz with no attempts, no questions and no grade item")
