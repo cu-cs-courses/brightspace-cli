@@ -2276,6 +2276,18 @@ def cmd_set_quiz(args):
         changed["DisplayInCalendar"] = args.calendar
     if args.special_access_only is not None:
         changed["AllowOnlyUsersWithSpecialAccess"] = args.special_access_only
+    if args.minutes is not None:
+        # The timer, enforced and with its clock shown, as new-quiz makes it;
+        # `none` takes it off. A quiz that gained a question needs a minute
+        # more, which the input form only takes as the whole limit.
+        had = before.get("SubmissionTimeLimit") if isinstance(before.get("SubmissionTimeLimit"), dict) else {}
+        if no_limit(args.minutes):
+            limit = {"IsEnforced": False, "ShowClock": False,
+                     "TimeLimitValue": int((had or {}).get("TimeLimitValue") or 120)}
+        else:
+            limit = {"IsEnforced": True, "ShowClock": True, "TimeLimitValue": int(args.minutes)}
+        if limit_of(had) != limit_of(limit):
+            changed["SubmissionTimeLimit"] = limit
     if args.header is not None:
         # The header shows above every page of the quiz: the resources allowed
         # and the mechanics, which is where E1 put them. An HTML file, kept in
@@ -2292,17 +2304,20 @@ def cmd_set_quiz(args):
                          "for every student. Write it in the quiz editor, and check the link as a student.")
         changed["Header"] = {"Text": {"Content": html_text, "Type": "Html"}, "IsDisplayed": True}
     changed = {k: v for k, v in changed.items()
-               if k == "Header" or before.get(k) != v}
+               if k in ("Header", "SubmissionTimeLimit") or before.get(k) != v}
     if not changed:
         raise Failed("nothing to change: the quiz already has those values, or none were named")
     refuse_student_names(s, ou, f"quiz {before.get('Name')!r}'s new name, header or password", changed.get("Name"),
                          pathlib.Path(args.header).read_text(encoding="utf-8") if args.header else None,
                          changed.get("Password"))
     payload |= changed
-    labels = {"IsAutoSetGraded": "auto-publish attempt results", "Header": "header"}
+    labels = {"IsAutoSetGraded": "auto-publish attempt results", "Header": "header",
+              "SubmissionTimeLimit": "time limit"}
     print(f"{before['Name']!r} (id {before['QuizId']})")
     for key, value in changed.items():
-        if key == "Header":
+        if key == "SubmissionTimeLimit":
+            print(f"  time limit: {limit_of(before.get(key))} -> {limit_of(value)}  (enforced, minutes)")
+        elif key == "Header":
             print(f"  header: {len(text_of((before.get('Header') or {}).get('Text')))} chars -> "
                   f"{len(text_of(value['Text']))} chars, displayed")
         else:
@@ -2317,6 +2332,8 @@ def cmd_set_quiz(args):
             "AutoExportToGrades", "SubmissionTimeLimit", "LateSubmissionInfo",
             "RestrictIPAddressRange", "AttemptsAllowed")
     def landed(k, v):
+        if k == "SubmissionTimeLimit":
+            return ("time limit", limit_of(v), limit_of(after.get(k)))
         if k == "Header":
             return ("header", text_of(v["Text"]).strip(), text_of((after.get("Header") or {}).get("Text")).strip())
         return (labels.get(k, k), v, after.get(k))
@@ -4237,6 +4254,7 @@ def main(argv=None):
                    help="show the quiz's dates in the course calendar (DisplayInCalendar)")
     x.add_argument("--special-access-only", dest="special_access_only", action=argparse.BooleanOptionalAction,
                    help="only users given special access in the UI see the quiz (AllowOnlyUsersWithSpecialAccess)")
+    x.add_argument("--minutes", help="the time limit, enforced, with its clock shown; 'none' takes it off")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the change and stop")
     x = with_course("new-item", cmd_new_item, help="create a grade item, shaped like a named one")
     x.add_argument("name")
