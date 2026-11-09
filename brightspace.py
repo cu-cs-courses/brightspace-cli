@@ -2288,6 +2288,19 @@ def cmd_set_quiz(args):
             limit = {"IsEnforced": True, "ShowClock": True, "TimeLimitValue": int(args.minutes)}
         if limit_of(had) != limit_of(limit):
             changed["SubmissionTimeLimit"] = limit
+    if args.description is not None:
+        # The description a student reads before starting, written as markdown,
+        # the way a quiz's YAML holds it and setup-quiz sends it. A quiz that
+        # gained a question kept "Seven questions" in it until this existed.
+        if not args.description.strip():
+            # an empty one clears it, as the quiz had none
+            changed["Description"] = {"Text": {"Content": "", "Type": "Html"}, "IsDisplayed": False}
+        else:
+            try:
+                html_text = quiz_format().md_html(args.description, "--description")
+            except Exception as e:
+                raise Failed(str(e))
+            changed["Description"] = {"Text": {"Content": html_text, "Type": "Html"}, "IsDisplayed": True}
     if args.header is not None:
         # The header shows above every page of the quiz: the resources allowed
         # and the mechanics, which is where E1 put them. An HTML file, kept in
@@ -2304,7 +2317,7 @@ def cmd_set_quiz(args):
                          "for every student. Write it in the quiz editor, and check the link as a student.")
         changed["Header"] = {"Text": {"Content": html_text, "Type": "Html"}, "IsDisplayed": True}
     changed = {k: v for k, v in changed.items()
-               if k in ("Header", "SubmissionTimeLimit") or before.get(k) != v}
+               if k in ("Header", "Description", "SubmissionTimeLimit") or before.get(k) != v}
     if not changed:
         raise Failed("nothing to change: the quiz already has those values, or none were named")
     refuse_student_names(s, ou, f"quiz {before.get('Name')!r}'s new name, header or password", changed.get("Name"),
@@ -2312,11 +2325,14 @@ def cmd_set_quiz(args):
                          changed.get("Password"))
     payload |= changed
     labels = {"IsAutoSetGraded": "auto-publish attempt results", "Header": "header",
-              "SubmissionTimeLimit": "time limit"}
+              "Description": "description", "SubmissionTimeLimit": "time limit"}
     print(f"{before['Name']!r} (id {before['QuizId']})")
     for key, value in changed.items():
         if key == "SubmissionTimeLimit":
             print(f"  time limit: {limit_of(before.get(key))} -> {limit_of(value)}  (enforced, minutes)")
+        elif key == "Description":
+            print(f"  description: {text_of((before.get(key) or {}).get('Text'))[:60]!r}… -> "
+                  f"{text_of(value['Text'])[:60]!r}…")
         elif key == "Header":
             print(f"  header: {len(text_of((before.get('Header') or {}).get('Text')))} chars -> "
                   f"{len(text_of(value['Text']))} chars, displayed")
@@ -2334,6 +2350,8 @@ def cmd_set_quiz(args):
     def landed(k, v):
         if k == "SubmissionTimeLimit":
             return ("time limit", limit_of(v), limit_of(after.get(k)))
+        if k == "Description":
+            return ("description", *text_pair(v["Text"]["Content"], text_of((after.get(k) or {}).get("Text"))))
         if k == "Header":
             return ("header", text_of(v["Text"]).strip(), text_of((after.get("Header") or {}).get("Text")).strip())
         return (labels.get(k, k), v, after.get(k))
@@ -4255,6 +4273,7 @@ def main(argv=None):
     x.add_argument("--special-access-only", dest="special_access_only", action=argparse.BooleanOptionalAction,
                    help="only users given special access in the UI see the quiz (AllowOnlyUsersWithSpecialAccess)")
     x.add_argument("--minutes", help="the time limit, enforced, with its clock shown; 'none' takes it off")
+    x.add_argument("--description", help="what a student reads before starting, in markdown, as a quiz's YAML holds it")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the change and stop")
     x = with_course("new-item", cmd_new_item, help="create a grade item, shaped like a named one")
     x.add_argument("name")

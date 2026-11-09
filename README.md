@@ -368,6 +368,7 @@ can be checked the morning of the exam in one command rather than five tabs.
         --ip 148.137.150.0-148.137.150.255
     ./brightspace.py set-quiz 240 'Quiz 3' --shuffle --auto-publish
     ./brightspace.py set-quiz 230 'Quiz 9' --minutes 9      # 'none' takes the timer off
+    ./brightspace.py set-quiz 230 'Quiz 9' --description 'Eight questions, nine minutes …'   # markdown; '' clears it
     ./brightspace.py new-folder 120 'Assignment 5' --like 'Assignment 4' \
         --open '2026-09-30 00:01' --due '2026-10-06 23:59:59' \
         --link https://example.edu/cmsc-120/assignments/a5-arrays.html
