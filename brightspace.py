@@ -20,6 +20,7 @@
                                                  the same from flags, the rest from the course's defaults
     ./brightspace.py quiz-defaults [120 --set minutes=8]   each course's quiz defaults
     ./brightspace.py set-folder 240 'Assignment 5' --show [--submissions keep-all]
+    ./brightspace.py delete-folder 240 'Assignment 9' --go   a folder nobody handed in to, to make it again
     ./brightspace.py set-quiz 120 'Quiz 3' --shuffle --auto-publish
     ./brightspace.py announcements 120
     ./brightspace.py checklists 115-01 ['Week 7']  the checklists, or one's items as new-checklist takes them
@@ -32,7 +33,7 @@
 
 Almost everything here reads. The commands that write are new-category,
 set-item, new-item, new-quiz, set-quiz, new-folder, set-folder, grade,
-copy-quiz, delete-quiz and new-checklist, setup through new-folder and
+copy-quiz, delete-quiz, delete-folder and new-checklist, setup through new-folder and
 new-item, and setup-quiz through new-item and new-quiz. They print what they are about to send,
 --dry-run stops before sending, and each reads its object back afterwards and
 says what Brightspace kept. Nothing else changes anything.
@@ -1829,10 +1830,25 @@ def cmd_set_item(args):
         changed["Weight"] = float(args.weight)
     if getattr(args, "points", None) is not None:
         changed["MaxPoints"] = float(args.points)
+    folder = None
+    if getattr(args, "folder", None):
+        # The same attachment new-item makes, for an item that already exists:
+        # setup reaches for it when a folder is made again under a name whose
+        # column is already in the gradebook, as 240's A9 was on 2026-11-12.
+        folder = find_folder(s, ou, args.folder)
+        if folder.get("GradeItemId") and folder["GradeItemId"] != item["Id"]:
+            raise Failed(f"{folder['Name']!r} already has grade item {folder['GradeItemId']}")
+        was = full.get("AssociatedTool") or {}
+        if was and was.get("ToolItemId") != folder["Id"]:
+            raise Failed(f"{full['Name']!r} is attached to {was.get('ToolItemId')} already; "
+                         "detach it in the web page first")
+        changed["AssociatedTool"] = {"ToolId": DROPBOX_TOOL, "ToolItemId": folder["Id"]}
     if not changed:
-        raise Failed("nothing to change: pass --name, --category, --weight or --points")
+        raise Failed("nothing to change: pass --name, --category, --weight, --points or --folder")
     payload = item_payload(full, changed)
-    tool = full.get("AssociatedTool") or {}
+    if folder:
+        payload["AssociatedTool"] = changed["AssociatedTool"]
+    tool = changed.get("AssociatedTool") or full.get("AssociatedTool") or {}
     print(f"{full['Name']!r} (id {full['Id']}), attached to "
           f"{tool.get('ToolItemId') or 'nothing'}")
     for key, value in changed.items():
@@ -1847,7 +1863,11 @@ def cmd_set_item(args):
     print(f"\nnow {after['Name']!r}, category {after.get('CategoryId')}, weight {after.get('Weight')}")
     checks = [(k.lower(), v, (after.get(k) or 0) if k == "CategoryId" else after.get(k))
               for k, v in changed.items()]
-    checks.append(("still attached to", tool or None, after.get("AssociatedTool") or None))
+    checks.append(("attached to" if folder else "still attached to", tool or None,
+                   after.get("AssociatedTool") or None))
+    if folder:
+        checks.append(("folder's grade item", item["Id"],
+                       find_folder(s, ou, str(folder["Id"])).get("GradeItemId")))
     check_landed(checks)
     show_weights(s, ou, "after")
 
@@ -2557,6 +2577,43 @@ def cmd_delete_quiz(args):
     print(f"deleted {q['Name']!r}")
 
 
+def cmd_delete_folder(args):
+    """Delete an assignment folder nobody has handed in to.
+
+    A folder with a submission in it holds student work, and is never deleted
+    here: that one goes in the web interface, by someone looking at it. What
+    this is for is a folder made wrong -- the dates, or hidden when it should
+    not have been -- so that setup can make it again: 240's A9, made hidden on
+    2026-11-03 and never shown, was found with 0 of 8 hand-ins the morning
+    after its deadline, 2026-11-12, and remade with new dates, visible.
+
+    The grade item the folder sends its scores to is left alone, and setup
+    attaches the remade folder to it. Without --go it only says whether the
+    folder may go; with it, it deletes and reads the folder list back.
+    """
+    s, ou, _ = course(args)
+    le, _ = s.versions()
+    f = find_folder(s, ou, args.folder)
+    fid = f["Id"]
+    handed = f.get("TotalUsersWithSubmissions") or 0
+    files = f.get("TotalFiles") or 0
+    print(f"{f['Name']!r} (id {fid}): {handed} students handed in, {files} files, "
+          f"hidden from students: {yes_no(f.get('IsHidden'))}, "
+          f"due {local(f.get('DueDate')) or 'no date'}, grade item: {f.get('GradeItemId') or 'none'}")
+    if handed or files:
+        raise Failed(f"not deleting: {handed} students handed in {files} files, which are student work.\n"
+                     "       A folder with work in it is deleted in the web interface, by someone looking at it.")
+    if not args.go:
+        print("  nothing handed in, so it may go; --go deletes it"
+              + (f", and leaves grade item {f['GradeItemId']} in the gradebook" if f.get("GradeItemId") else ""))
+        return
+    s.send("DELETE", f"/d2l/api/le/{le}/{ou}/dropbox/folders/{fid}", None)
+    left = [x["Id"] for x in folders(s, ou)]
+    check_landed([("gone from the folder list", False, fid in left)])
+    print(f"deleted {f['Name']!r}"
+          + (f"; grade item {f['GradeItemId']} is still in the gradebook" if f.get("GradeItemId") else ""))
+
+
 # --- one quiz into several sections -------------------------------------------
 #
 # The API copies a tool, never one item: a copy job asked for Quizzes copies
@@ -3014,14 +3071,20 @@ def setup_remainder(plan, course_label):
     if not plan["folder"]:
         return "Nothing is left to do by hand for the column."
     if plan["visible"]:
-        return "Nothing is left to do by hand for the folder and its column."
+        return (f"VISIBLE: students see {plan['name']} in Assignments now, and can hand in from "
+                f"{plan['opens']} until {plan['due']}.\n"
+                "Nothing is left to do by hand for the folder and its column.")
     when = f"on {plan['published']}, " if plan["shown_later"] else ""
-    return (f"Then, {when}when {plan['name']} goes out:\n"
+    return (f"HIDDEN: students cannot see {plan['name']} or hand in to it, and nothing will remind you.\n"
+            f"Then, {when}when {plan['name']} goes out:\n"
             f"    brightspace.py set-folder {course_label} '{plan['name']}' --show\n"
+            "and check it landed with --check, which says HIDDEN in capitals while it is.\n"
+            "240's A9 went out this way on 2026-11-05 and was never shown: 0 of 8 handed in by its\n"
+            "deadline. config/brightspace.yml's visible: true makes the folder visible from the start.\n"
             "The column shows in Grades from the start, empty, since new-item cannot hide one.")
 
 
-def check_setup(s, ou, plan):
+def check_setup(s, ou, plan, course_label="COURSE"):
     """Brightspace beside the course site's files. True when nothing differs."""
     rows = []
     def row(what, want, got, same=None):
@@ -3042,8 +3105,14 @@ def check_setup(s, ou, plan):
             row("link", plan["link"], got or ", ".join(h for h in hrefs if h) or "(none)",
                 plan["link"] == got or plan["link"] in hrefs)
             row("its grade item", item["Id"] if item else "-", f.get("GradeItemId") or "(none)")
-            rows.append(["hidden", "", yes_no(f.get("IsHidden")), ""])
+            row("visible to students", "yes" if plan["visible"] else "no", yes_no(not f.get("IsHidden")))
     table(["", "the site says", "Brightspace has", ""], rows)
+    if plan["folder"] and f and f.get("IsHidden"):
+        now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        opened = local_to_utc(plan["opens"]) <= now
+        print(f"\nHIDDEN: students cannot see {plan['name']} or hand in to it"
+              + (", and it opened " + plan["opens"][:16] if opened else "")
+              + f".\n    brightspace.py set-folder {course_label} '{plan['name']}' --show")
     return not any(r[3] for r in rows)
 
 
@@ -3073,7 +3142,7 @@ def cmd_setup(args):
         print(f"  a grade item only; settings from {plan['like']!r}\n")
     if args.check:
         s, ou, _ = course(args)
-        if not check_setup(s, ou, plan):
+        if not check_setup(s, ou, plan, args.course):
             sys.exit(1)
         return
     common = dict(vars(args), name=plan["name"], like=plan["like"], dry_run=not args.go)
@@ -3084,8 +3153,20 @@ def cmd_setup(args):
         print()
     # Attached from the item's side so the folder is never rewritten. A plan
     # cannot name the folder, which does not exist until --go.
-    cmd_new_item(argparse.Namespace(**common, points=None, category=None, weight=None,
-                                    folder=plan["name"] if plan["folder"] and args.go else None))
+    s, ou, _ = course(args)
+    had = [g for g in grade_items(s, ou) if g["Name"].strip().lower() == plan["name"].lower()]
+    if had and plan["folder"]:
+        # The column is already in the gradebook: a folder made again after
+        # delete-folder. The new folder is attached to it, from the item's side.
+        print(f"grade item {plan['name']!r} exists already, id {had[0]['Id']}; "
+              + ("attaching the folder to it" if args.go else "--go attaches the new folder to it"))
+        if args.go:
+            cmd_set_item(argparse.Namespace(**{**common, "item": str(had[0]["Id"]), "name": None,
+                                                "category": None, "weight": None, "points": None,
+                                                "folder": plan["name"]}))
+    else:
+        cmd_new_item(argparse.Namespace(**common, points=None, category=None, weight=None,
+                                        folder=plan["name"] if plan["folder"] and args.go else None))
     print("\n" + setup_remainder(plan, args.course))
 
 
@@ -4223,6 +4304,7 @@ def main(argv=None):
     x.add_argument("--category", help="move it into this category, by name or id")
     x.add_argument("--weight")
     x.add_argument("--points", help="what it is out of: a quiz that grows a question grows its column")
+    x.add_argument("--folder", help="attach it to this assignment folder, by name or id, from the item's side")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the payload and stop")
     x = with_course("new-quiz", cmd_new_quiz, help="create a quiz; its question is added by hand after")
     x.add_argument("name")
@@ -4374,6 +4456,10 @@ def main(argv=None):
     x = with_course("delete-quiz", cmd_delete_quiz,
                     help="delete a quiz with no attempts, no questions and no grade item")
     x.add_argument("quiz", help="the quiz's name (or enough of it), or its id")
+    x.add_argument("--go", action="store_true", help="delete it; without this it only checks")
+    x = with_course("delete-folder", cmd_delete_folder,
+                    help="delete an assignment folder nobody has handed in to, so setup can make it again")
+    x.add_argument("folder", help="the folder's name (or enough of it), or its id")
     x.add_argument("--go", action="store_true", help="delete it; without this it only checks")
 
     with_course("classlist", cmd_classlist, help="who is enrolled, with roles").add_argument(

@@ -381,6 +381,7 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py set-folder 240 'Assignment 5' --show [--submissions keep-all]
     ./brightspace.py grade 240 Presentation --max 'Ada Lovelace' 'Alan Turing' [--go]
     ./brightspace.py delete-quiz 230 Untitled --go
+    ./brightspace.py delete-folder 240 'Assignment 9' --go
     ./brightspace.py copy-quiz 115-shell --to 115-01 115-02 115-03 --item-like previous [--go] [--clear]
     ./brightspace.py new-checklist 115-01 115-02 115-03 --name 'Week 7' \
         --item 'Read chapter 3' --due '2026-10-13 23:59' --item 'Quiz 6' [--go]
@@ -535,6 +536,25 @@ Attempts are student work, questions are authoring no route can put back, and a
 visible or graded quiz is in use, so any of those is refused with every reason
 listed. What is left is the blank a stray click on *New Quiz* leaves behind.
 Without `--go` it only says whether the quiz may go.
+
+**`delete-folder` removes only an assignment folder nobody has handed in
+to.** A submission is student work, so a folder with one is refused and is
+deleted in the web page, by someone looking at it. What this is for is a
+folder made wrong, its dates or its visibility, so that `setup` can make it
+again: the grade item stays in the gradebook, and `setup` attaches the remade
+folder to it from the item's side (`set-item --folder`) rather than making a
+second column. 240's A9 is the case: made hidden on 2026-11-03 and never
+shown, it had 0 of 8 hand-ins the morning after its deadline, 2026-11-12, and
+was remade visible with new dates. Without `--go` it only says whether the
+folder may go.
+
+**`setup` says out loud whether students can see the folder.** A folder made
+with `visible: false` in `config/brightspace.yml` ends `setup` with HIDDEN in
+capitals and the `set-folder --show` line that shows it, and `--check` prints
+the same for as long as it stays hidden, since nothing else will: Brightspace
+sends no reminder, and `folders` marks it in one small word. A9 is why. The
+three courses now make every folder visible from the start, and the start
+date keeps students out until the assignment goes out.
 
 **`copy-quiz` puts one quiz into several sections,** for a course taught as
 one Brightspace course per section. The API copies a whole tool, never one
