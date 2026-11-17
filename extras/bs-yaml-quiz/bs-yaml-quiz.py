@@ -5,6 +5,8 @@
     bs-yaml-quiz.py quiz.yml --check     exit 1 if quiz.csv is not what quiz.yml makes
     bs-yaml-quiz.py quiz.csv             writes quiz.yml: the other way, for a CSV made elsewhere
     bs-yaml-quiz.py quiz.yml -o out.csv
+    bs-yaml-quiz.py quiz.yml --msa-as-sa an MSA question as a short answer with its first blank,
+                                         and the other blanks' answers printed, to add by hand
 
 The YAML holds the structure, a question's text is Markdown inside it, and
 the CSV is generated: edit the YAML and run this, and never edit the CSV by
@@ -47,16 +49,20 @@ except ImportError:
 # because a Question Library question carries no stylesheet of its own.
 PRE = '<pre style="font-family:monospace;">'
 CELLS = 5
-TYPES = ("MC", "SA", "WR", "TF", "MS", "M", "O")
+TYPES = ("MC", "SA", "WR", "TF", "MS", "M", "O")     # what the CSV carries
+# MSA, a short answer with several blanks, is a YAML type only. The CSV cannot
+# say which blank an answer is for, so --msa-as-sa writes it as an SA with its
+# first blank, and the rest are added by hand; without the flag it is refused.
+YAML_TYPES = TYPES + ("MSA",)
 # A question's keys, in the order they are written to the YAML. A question has
 # exactly one of text (Markdown), html (as it goes in) and plain_text (no HTML).
 KEYS = ("title", "type", "id", "points", "difficulty", "image", "scoring",
-        "text", "html", "plain_text", "initial_text", "answer_key", "answers", "width", "rows",
-        "options", "correct", "weights", "true_feedback", "false_feedback", "choices",
+        "text", "html", "plain_text", "initial_text", "answer_key", "answers", "blanks", "width",
+        "rows", "options", "correct", "weights", "true_feedback", "false_feedback", "choices",
         "matches", "items", "hint", "feedback")
 TEXTS = ("text", "html", "plain_text")
 OWN = {"MC": {"options"}, "MS": {"options", "scoring"}, "SA": {"answers", "width", "rows"},
-       "WR": {"initial_text", "answer_key"},
+       "MSA": {"blanks", "width", "rows"}, "WR": {"initial_text", "answer_key"},
        "TF": {"correct", "weights", "true_feedback", "false_feedback"},
        "M": {"choices", "matches", "scoring"}, "O": {"items", "scoring"}}
 COMMON = {"title", "type", "id", "points", "difficulty", "image", "hint", "feedback", *TEXTS}
@@ -370,31 +376,96 @@ def plain(value, where, what):
     return value.strip("\n")
 
 
-def question_rows(q, where):
-    """The rows of one question, in the order D2L's own sample has them."""
+def answer_rows(answers, where):
+    """The Answer rows of a short answer: each spelling, at 100 unless a weight
+    is given, and a regular expression where regexp: says so."""
+    rows = []
+    for a in answers:
+        weight, text, rest = ("100", a, {}) if isinstance(a, str) else weighted(a, where, "answers")
+        if set(rest) - {"regexp"}:
+            raise Failed(f"{where}: an answer takes nothing but regexp: beside its weight")
+        regexp = truth(rest["regexp"], where, "regexp") if "regexp" in rest else False
+        rows.append(["Answer", weight, plain(text, where, "an answer"), "regexp" if regexp else ""])
+    return rows
+
+
+def msa_blanks(q, where):
+    """An MSA question's blanks, as [(the prompt's HTML, its answers)].
+
+    Each blank is a mapping, `prompt:` and `answers:`. A bare list of answers is
+    refused rather than read, since `- 3` and `- three` under blanks: would then
+    be two blanks where a list of spellings was meant: one blank, two answers.
+    """
+    blanks = q.get("blanks")
+    if not isinstance(blanks, list) or len(blanks) < 2:
+        raise Failed(f"{where}: an MSA question needs blanks:, two or more, each a prompt: and "
+                     "its answers:" + ("; one blank is a short answer, type: SA"
+                                       if isinstance(blanks, list) and len(blanks) == 1 else ""))
+    out = []
+    for i, b in enumerate(blanks, 1):
+        if not isinstance(b, dict) or set(b) != {"prompt", "answers"}:
+            raise Failed(f"{where}: blank {i} is a prompt: and its answers:, not {b!r}")
+        prompt = plain(b["prompt"], f"{where}, blank {i}", "prompt")
+        if not prompt.strip():
+            raise Failed(f"{where}: blank {i}'s prompt is empty; it is what tells the box apart")
+        answers = spliced(b["answers"])
+        if not isinstance(answers, list) or not answers:
+            raise Failed(f"{where}: blank {i} needs answers, every spelling that counts")
+        out.append((inline(prompt.strip()), answers))
+    return out
+
+
+def msa_prompts(blanks):
+    """Every blank's prompt, in order, as the list that ends the question's text:
+    the boxes appear in the same order, so item 2 says what box 2 is for."""
+    return "<ol>" + "".join(f"<li>{p}</li>" for p, _ in blanks) + "</ol>"
+
+
+def question_rows(q, where, msa_as_sa=False):
+    """The rows of one question, in the order D2L's own sample has them.
+
+    An MSA question is refused unless msa_as_sa: then it is written as a short
+    answer whose text keeps every blank's prompt and whose box takes the first
+    blank's answers, the other blanks being msa_steps's, to add by hand.
+    """
     if not isinstance(q, dict):
         raise Failed(f"{where}: a question is a mapping of keys, not {q!r}")
     kind = q.get("type")
-    if kind not in TYPES:
-        raise Failed(f"{where}: type is one of {', '.join(TYPES)}, not {kind!r}")
+    if kind not in YAML_TYPES:
+        raise Failed(f"{where}: type is one of {', '.join(YAML_TYPES)}, not {kind!r}")
     wrong = [k for k in q if k not in COMMON | OWN[kind]]
+    if kind == "MSA" and "answers" in wrong:
+        raise Failed(f"{where}: an MSA question has blanks:, each a prompt: and its answers:, "
+                     "where a short answer has answers:")
     if wrong:
         raise Failed(f"{where}: a {kind} question has no {', '.join(map(str, wrong))}")
     texts = [k for k in TEXTS if k in q]
     if len(texts) != 1:
         raise Failed(f"{where}: a question has one of text, html and plain_text"
                      + (f", not {' and '.join(texts)}" if texts else ""))
+    blanks = None
+    if kind == "MSA":
+        if "plain_text" in q:
+            raise Failed(f"{where}: an MSA question's prompts go in as a list, which needs HTML: "
+                         "text: or html:, not plain_text:")
+        blanks = msa_blanks(q, where)
+        if not msa_as_sa:
+            raise Failed(f"{where}: the CSV cannot say which blank an answer is for, so an MSA "
+                         "question goes in as a short answer with every prompt and the first "
+                         "blank's answers, the other blanks added by hand in Brightspace; "
+                         "run bs-yaml-quiz.py with --msa-as-sa to write it that way")
 
-    rows = [["NewQuestion", kind]]
+    rows = [["NewQuestion", "SA" if kind == "MSA" else kind]]
     for key, name in (("id", "ID"), ("title", "Title")):
         if key in q:
             rows.append([name, plain(q[key], where, key)])
+    after = msa_prompts(blanks) if blanks else ""
     if "text" in q:
         if not isinstance(q["text"], str):
             raise Failed(f"{where}: text is Markdown, one string, not {q['text']!r}")
-        rows.append(["QuestionText", md_html(q["text"], where), "HTML"])
+        rows.append(["QuestionText", md_html(q["text"], where) + after, "HTML"])
     elif "html" in q:
-        rows.append(["QuestionText", plain(q["html"], where, "html"), "HTML"])
+        rows.append(["QuestionText", plain(q["html"], where, "html") + after, "HTML"])
     else:
         rows.append(["QuestionText", plain(q["plain_text"], where, "plain_text"), ""])
     rows.append(["Points", number(q.get("points", POINTS), where, "points")])
@@ -405,19 +476,17 @@ def question_rows(q, where):
         if key in q:
             rows.append([name, plain(q[key], where, key)])
 
-    if kind == "SA":
+    if kind in ("SA", "MSA"):
+        if kind == "SA":
+            answers = spliced(q.get("answers"))
+            if not isinstance(answers, list) or not answers:
+                raise Failed(f"{where}: a short answer needs answers, every spelling that counts")
+        else:
+            answers = blanks[0][1]
         if q.get("width", WIDTH) not in NONE:
             rows.append(["InputBox", number(q.get("rows", ROWS), where, "rows"),
                          number(q.get("width", WIDTH), where, "width")])
-        answers = spliced(q.get("answers"))
-        if not isinstance(answers, list) or not answers:
-            raise Failed(f"{where}: a short answer needs answers, every spelling that counts")
-        for a in answers:
-            weight, text, rest = ("100", a, {}) if isinstance(a, str) else weighted(a, where, "answers")
-            if set(rest) - {"regexp"}:
-                raise Failed(f"{where}: an answer takes nothing but regexp: beside its weight")
-            regexp = truth(rest["regexp"], where, "regexp") if "regexp" in rest else False
-            rows.append(["Answer", weight, plain(text, where, "an answer"), "regexp" if regexp else ""])
+        rows += answer_rows(answers, where)
     if kind in ("MC", "MS"):
         options = spliced(q.get("options"))
         if not isinstance(options, list) or not options:
@@ -455,8 +524,40 @@ def question_rows(q, where):
     return rows
 
 
-def to_csv(data, where):
-    """The CSV text, CRLF line endings, for a loaded quiz document."""
+def describe(answer, where):
+    """An answer as a line to type into Brightspace: its text, and its weight
+    and regexp beside it in brackets where it has them."""
+    if isinstance(answer, str):
+        return answer
+    weight, text, rest = weighted(answer, where, "answers")
+    notes = ([] if weight == "100" else [f"{weight}%"]) + (
+        ["regexp"] if "regexp" in rest and truth(rest["regexp"], where, "regexp") else [])
+    return text + (f"  [{', '.join(notes)}]" if notes else "")
+
+
+def msa_steps(data, where):
+    """What --msa-as-sa leaves to do by hand: for each MSA question, the
+    blanks after its first, each with its prompt and every answer it takes."""
+    lines = []
+    for n, q in enumerate(data["questions"], 1):
+        if not (isinstance(q, dict) and q.get("type") == "MSA"):
+            continue
+        title = q.get("title")
+        at = f"{where}, question {n}" + (f" ({title})" if title else "")
+        blanks = msa_blanks(q, at)
+        lines.append(f"question {n}" + (f" ({title})" if title else "")
+                     + f": blank 1 of {len(blanks)} imported; add the others in the Question Library")
+        for i, b in enumerate(q["blanks"][1:], 2):
+            lines.append(f"  blank {i}, for: {b['prompt'].strip()}")
+            lines += [f"    {describe(a, at)}" for a in blanks[i - 1][1]]
+    if lines:
+        lines.insert(0, "Then by hand, since the CSV carries one blank of each MSA question:")
+    return lines
+
+
+def to_csv(data, where, msa_as_sa=False):
+    """The CSV text, CRLF line endings, for a loaded quiz document. An MSA
+    question is refused unless msa_as_sa, as question_rows says."""
     if (not isinstance(data, dict) or "questions" not in data or set(data) - {"questions", "brightspace"}
             or not isinstance(data["questions"], list)):
         raise Failed(f"{where}: a quiz file is `questions:` and the list of them, "
@@ -472,7 +573,7 @@ def to_csv(data, where):
     for n, q in enumerate(data["questions"], 1):
         title = q.get("title") if isinstance(q, dict) else None
         at = f"{where}, question {n}" + (f" ({title})" if title else "")
-        for row in question_rows(q, at):
+        for row in question_rows(q, at, msa_as_sa):
             if any(not isinstance(c, str) for c in row):
                 raise Failed(f"{at}: {row[0]} wants text, and has {row!r}")
             if any("\t" in c for c in row):
@@ -749,6 +850,10 @@ def main(argv=None):
     p.add_argument("--check", action="store_true",
                    help="for a .yml: exit 1 if the CSV beside it is not what it makes; write nothing")
     p.add_argument("--force", action="store_true", help="for a .csv: replace a .yml that exists")
+    p.add_argument("--msa-as-sa", action="store_true",
+                   help="for a .yml: write an MSA question as a short answer with every blank's "
+                        "prompt and the first blank's answers, and print the other blanks' answers "
+                        "to add by hand; without it, an MSA question stops the run")
     args = p.parse_args(argv)
     if args.output and len(args.files) > 1:
         p.error("-o names one output, so it takes one FILE")
@@ -762,7 +867,7 @@ def main(argv=None):
                     data = load(src.read_text(encoding="utf-8"))
                 except yaml.YAMLError as e:
                     raise Failed(f"{src}: not YAML: {e}")
-                text = to_csv(data, str(src))
+                text = to_csv(data, str(src), args.msa_as_sa)
                 if args.check:
                     have = dest.read_bytes().decode("utf-8") if dest.exists() else None
                     if have != text:
@@ -773,6 +878,8 @@ def main(argv=None):
                 with open(dest, "w", encoding="utf-8", newline="") as f:
                     f.write(text)
                 print(f"wrote {dest}: {len(data['questions'])} questions")
+                for line in msa_steps(data, str(src)):
+                    print(line)
             elif src.suffix == ".csv":
                 dest = pathlib.Path(args.output) if args.output else src.with_suffix(".yml")
                 if dest.exists() and not args.force:

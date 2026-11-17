@@ -7,6 +7,7 @@ the question-import CSV that puts it in a course's Question Library.
     bs-yaml-quiz.py quiz.yml --check     exit 1 if quiz.csv is not what quiz.yml makes
     bs-yaml-quiz.py quiz.csv             writes quiz.yml from a CSV made some other way
     bs-yaml-quiz.py quiz.yml -o out.csv
+    bs-yaml-quiz.py quiz.yml --msa-as-sa an MSA question as a short answer with one blank; below
 
 It needs PyYAML (`pip install pyyaml`, or `python3.withPackages (ps: [ ps.pyyaml ])`
 on Nix) and nothing else.
@@ -58,11 +59,12 @@ question is:
 | key | what it is |
 |---|---|
 | `title` | The question's name in the Question Library. Students see it only if the quiz is set to show titles. |
-| `type` | `SA` short answer, `MC` multiple choice, `WR` written response, `TF` true or false, `MS` multi-select, `M` matching, `O` ordering. |
+| `type` | `SA` short answer, `MC` multiple choice, `WR` written response, `TF` true or false, `MS` multi-select, `M` matching, `O` ordering, and `MSA`, a short answer with several blanks, which the CSV cannot carry whole: see [Several blanks](#several-blanks). |
 | `text` | The question, in Markdown; below. |
 | `points` | What it is worth. 1 when left out. |
 | `answers` | `SA`: every spelling that counts, one per line. D2L compares strings, so a right answer in a spelling not listed here is marked wrong. Casing does not matter: short answers are case-insensitive by default. `- 50: half right` gives a spelling partial credit, and `regexp: true` beside it makes it a regular expression. |
-| `width`, `rows` | `SA`: the input box, 40 wide and 1 row when left out. `width: null` leaves the box out. |
+| `blanks` | `MSA`: two or more, in order, each a `prompt:` and its `answers:`, which are as `SA`'s. |
+| `width`, `rows` | `SA`, `MSA`: the input box, 40 wide and 1 row when left out. `width: null` leaves the box out. |
 | `options` | `MC`, `MS`: in order, each `- <weight>: <text>`, the weight being the percent it earns. `feedback:` beside one is shown when it is chosen. Options are plain text: D2L shows them as written, so Markdown and HTML are both wrong there. |
 | `correct` | `TF`: `true` or `false`. `weights: [TRUE's, FALSE's]` instead of 100 and 0, and `true_feedback` and `false_feedback`. |
 | `choices`, `matches` | `M`: choices numbered from 1 in order, and matches as `- <choice's number>: <text>`. |
@@ -106,6 +108,71 @@ so that the CSV is the same every time and the same as one written by hand:
 
 `html:` in place of `text:` takes the question's HTML as it goes into the CSV,
 and `plain_text:` takes text that D2L is to show without reading HTML at all.
+
+## Several blanks
+
+Brightspace's short answer can have several blanks, each with answers of its
+own, and the CSV cannot say which blank an answer is for (below, under what the
+CSV has to get right). So a question with several blanks is written as `MSA`,
+D2L's own name for it, and goes in by halves: the CSV carries the question and
+its first blank, and the other blanks are added by hand in the Question
+Library.
+
+```yaml
+- title: Q3 Two names after the loop
+  type: MSA
+  points: 2
+  text: |
+    You run this:
+
+    ```java
+    int x = 1, y = 2;
+    x += y;
+    ```
+
+    What do the names hold now?
+  blanks:
+  - prompt: "`x` holds"
+    answers: [3, three]
+  - prompt: "`y` holds"
+    answers:
+    - 2
+    - two
+```
+
+**It is refused unless the run says `--msa-as-sa`**, so that a question does not
+lose its blanks without anyone deciding it should. With the flag:
+
+- **The question's text keeps every prompt**, in order, as a numbered list after
+  the text, so a student can tell the boxes apart: the second box is for the
+  second item. A prompt is one line of Markdown, as a paragraph's inline is.
+- **Its one box takes the first blank's answers.** The others are dropped from
+  the CSV, and nothing else is.
+- **The run prints the rest**: each blank after the first, its prompt, and every
+  answer it takes, one to a line, with a weight or `regexp` beside it in
+  brackets. Add them in the Question Library after the import.
+
+```
+wrote quiz.csv: 8 questions
+Then by hand, since the CSV carries one blank of each MSA question:
+question 3 (Q3 Two names after the loop): blank 1 of 2 imported; add the others in the Question Library
+  blank 2, for: `y` holds
+    2
+    two
+```
+
+`--check` takes the flag too, and refuses an `MSA` question without it, as the
+run that writes does. A blank is a mapping, never a bare list of answers:
+`- [3, three]` under `blanks:` is refused, since `- 3` and `- three` written one
+under the other would otherwise be two blanks where one blank and two spellings
+were meant. One blank is a short answer: write it as `SA`. The prompts need
+HTML, so `MSA` takes `text:` or `html:`, not `plain_text:`.
+
+Going back, a CSV holds no `MSA`: what one made comes back as the `SA` it went
+in as, its prompts a raw HTML block.
+
+`brightspace.py setup-quiz` reads the quiz through this, and refuses a file
+with an `MSA` question for the same reason; it has no flag to say otherwise.
 
 ## Where it goes on Brightspace
 
@@ -177,7 +244,9 @@ tool handles and one of which it cannot:
   answer belongs to: two `InputBox` rows import as a single box that takes
   every answer listed, and an `MSA` question is not imported at all. Measured
   on a sandbox, 2026-10-04. A question that wants two values is two questions
-  over the same program.
+  over the same program, or an `MSA` in the YAML, written with `--msa-as-sa`
+  as a short answer with every prompt and its first blank, the other blanks
+  added by hand: see [Several blanks](#several-blanks).
 - **Do not open the CSV in Excel and save it.** Its "CSV UTF-8" adds a BOM and
   mangles the HTML.
 - **Importing puts questions in the Question Library only.** The quiz itself

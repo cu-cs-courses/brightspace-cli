@@ -174,6 +174,94 @@ check("an anchored list, whole or as one item among others, is spliced in where 
               ("Option", "100", "right"), ("Option", "0", "wrong one"), ("Option", "0", "wrong two"),
               ("Option", "0", "wrong one"), ("Option", "0", "wrong two"), ("Option", "100", "right again")], got)
 
+# --- MSA: several blanks, written as a short answer with --msa-as-sa ---------------------
+MSA = """questions:
+- title: Q1 Two names
+  type: MSA
+  points: 2
+  text: |
+    You run this:
+
+    ```java
+    int x = 1, y = 2;
+    x += y;
+    ```
+
+    What do the names hold now?
+  blanks:
+  - prompt: "`x` holds"
+    answers:
+    - 3
+    - three
+  - prompt: "`y` holds"
+    answers:
+    - 2
+    - 50: "2.0"
+    - 100: "^ *2 *$"
+      regexp: true
+- type: SA
+  text: Plain one.
+  answers: [x]
+"""
+yml("msa.yml", MSA)
+run("msa.yml", ok=False, has=["question 1 (Q1 Two names)", "which blank an answer is for", "--msa-as-sa"])
+check("without --msa-as-sa no CSV is written", not (tmp / "msa.csv").exists())
+run("msa.yml", "--check", ok=False, has=["--msa-as-sa"], lacks=["missing"])
+out = run("msa.yml", "--msa-as-sa", has=[
+    "wrote msa.csv: 2 questions",
+    "question 1 (Q1 Two names): blank 1 of 2 imported",
+    "  blank 2, for: `y` holds\n    2\n    2.0  [50%]\n    ^ *2 *$  [regexp]\n"])
+check("the blanks after the first are all that is printed: blank 1's answers are in the CSV",
+      "    3\n" not in out and "three" not in out and "blank 1," not in out, out)
+r = rows("msa.csv")
+check("an MSA question goes in as a short answer", [x[1] for x in r if x[0] == "NewQuestion"] == ["SA", "SA"], r)
+qt = [x for x in r if x[0] == "QuestionText"][0]
+check("its text keeps every blank's prompt, as a list after the text, in Markdown's HTML",
+      qt[2] == "HTML" and qt[1].endswith("<p>What do the names hold now?</p>"
+                                         "<ol><li><code>x</code> holds</li><li><code>y</code> holds</li></ol>"), qt)
+check("its one box takes the first blank's answers alone, the others printed for by hand",
+      r[3:8] == [["Points", "2", "", "", ""], ["InputBox", "1", "40", "", ""],
+                 ["Answer", "100", "3", "", ""], ["Answer", "100", "three", "", ""], ["", "", "", "", ""]], r[3:8])
+run("msa.yml", "--check", "--msa-as-sa", lacks=["not what", "missing", "Then by hand"])
+run("example.yml", "--msa-as-sa", lacks=["Then by hand"])
+check("--msa-as-sa changes nothing in a quiz without an MSA question", (tmp / "example.csv").read_bytes() == raw)
+run("msa.csv", "-o", "msa-back.yml", has=["byte for byte"])
+run("msa-back.yml", "-o", "msa-back.csv")
+check("its CSV comes back as a short answer, the prompts a raw HTML block, and the same bytes",
+      (tmp / "msa-back.csv").read_bytes() == (tmp / "msa.csv").read_bytes()
+      and "type: SA" in (tmp / "msa-back.yml").read_text() and "{=html}" in (tmp / "msa-back.yml").read_text())
+yml("msa-html.yml", "questions:\n- type: MSA\n  html: <p>Fill them.</p>\n  blanks:\n"
+    "  - prompt: first\n    answers: [a]\n  - prompt: second\n    answers: [b]\n")
+run("msa-html.yml", "--msa-as-sa")
+check("an MSA question's html: text gets the prompts too",
+      ["QuestionText", "<p>Fill them.</p><ol><li>first</li><li>second</li></ol>", "HTML", "", ""]
+      in rows("msa-html.csv"), rows("msa-html.csv"))
+yml("msa-anchor.yml", "questions:\n- type: SA\n  text: One.\n  answers: &one\n  - 1\n  - one\n"
+    "- type: MSA\n  text: Two.\n  blanks:\n  - prompt: a\n    answers: *one\n"
+    "  - prompt: b\n    answers:\n    - *one\n    - uno\n")
+run("msa-anchor.yml", "--msa-as-sa", has=["  blank 2, for: b\n    1\n    one\n    uno\n"])
+check("an anchored list is a blank's answers, whole or spliced in",
+      [x[2] for x in rows("msa-anchor.csv") if x[0] == "Answer"] == ["1", "one", "1", "one"],
+      rows("msa-anchor.csv"))
+write_csv("msa-in.csv", [["NewQuestion", "MSA"], ["QuestionText", "<p>Hi.</p>", "HTML"], []])
+run("msa-in.csv", ok=False, has=["question type 'MSA' is not one this tool knows"])
+
+def msa_refuses(name, blanks, says, extra=""):
+    yml(name, "questions:\n- type: MSA\n  text: Hi.\n" + extra + blanks)
+    run(name, "--msa-as-sa", ok=False, has=[says])
+
+msa_refuses("msa-one.yml", "  blanks:\n  - prompt: p\n    answers: [x]\n", "one blank is a short answer, type: SA")
+msa_refuses("msa-none.yml", "", "needs blanks:, two or more")
+msa_refuses("msa-bare.yml", "  blanks:\n  - [3, three]\n  - [5, five]\n", "blank 1 is a prompt: and its answers:")
+msa_refuses("msa-noans.yml", "  blanks:\n  - prompt: p\n    answers: []\n  - prompt: q\n    answers: [y]\n",
+            "blank 1 needs answers")
+msa_refuses("msa-empty.yml", "  blanks:\n  - prompt: ''\n    answers: [x]\n  - prompt: q\n    answers: [y]\n",
+            "blank 1's prompt is empty")
+msa_refuses("msa-answers.yml", "  answers: [x]\n", "where a short answer has answers:")
+yml("msa-plain.yml", "questions:\n- type: MSA\n  plain_text: Hi.\n  blanks:\n"
+    "  - prompt: p\n    answers: [x]\n  - prompt: q\n    answers: [y]\n")
+run("msa-plain.yml", "--msa-as-sa", ok=False, has=["not plain_text:"])
+
 # --- the Markdown it reads -------------------------------------------------------------
 md = lambda s: bq.md_html(s, "test")
 check("a backslash makes punctuation literal", md(r"\*not emphasis\* and \`no code\`") ==
