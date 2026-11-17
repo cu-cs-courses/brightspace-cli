@@ -3060,9 +3060,13 @@ def assignment_plan(site, aid, like=None, today=None):
         plan |= {"published": entry["published"],
                  "opens": f"{entry['published']} {policy['opens']}",
                  "due": f"{entry['due']} {policy['closes']}",
-                 # A course that shows its folders still hides one made early.
-                 "visible": policy["visible"] is True and entry["published"] <= today,
-                 "shown_later": policy["visible"] is True and entry["published"] > today}
+                 # A folder made early is visible even so: its start date, the
+                 # class the assignment goes out in, keeps students from handing
+                 # in before then, and a hidden one waits for a step nobody runs
+                 # (240's A9, 2026-11-05 to 11-12). Until 2026-11-17 this hid
+                 # a folder whose published: day had not come.
+                 "visible": policy["visible"] is True,
+                 "shown_later": False}
     return plan
 
 
