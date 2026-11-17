@@ -875,7 +875,9 @@ def run_setup(form, profile):
         src.write_text(text, encoding="utf-8")
         try:
             fmt = B.quiz_format()
-            csv = (src.with_suffix(".csv").name, fmt.to_csv(fmt.load(text), name))
+            # As bs-yaml-quiz.py --msa-as-sa would leave it: setup-quiz then lists an
+            # MSA question's other blanks among its steps by hand.
+            csv = (src.with_suffix(".csv").name, fmt.to_csv(fmt.load(text), name, msa_as_sa=True))
             src.with_suffix(".csv").write_bytes(csv[1].encode("utf-8"))
         except Exception:
             csv = None      # whatever stops the CSV, setup-quiz reports it in its own words

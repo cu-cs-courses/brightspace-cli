@@ -154,8 +154,8 @@ lose its blanks without anyone deciding it should. With the flag:
 
 ```
 wrote quiz.csv: 8 questions
-Then by hand, since the CSV carries one blank of each MSA question:
-question 3 (Q3 Two names after the loop): blank 1 of 2 imported; add the others in the Question Library
+Then by hand, in the Question Library after the import, since the CSV carries one blank of each MSA question:
+question 3 (Q3 Two names after the loop): blank 1 of 2 imported
   blank 2, for: `y` holds
     2
     two
@@ -171,8 +171,12 @@ HTML, so `MSA` takes `text:` or `html:`, not `plain_text:`.
 Going back, a CSV holds no `MSA`: what one made comes back as the `SA` it went
 in as, its prompts a raw HTML block.
 
-`brightspace.py setup-quiz` reads the quiz through this, and refuses a file
-with an `MSA` question for the same reason; it has no flag to say otherwise.
+`brightspace.py setup-quiz` reads the quiz through this, and takes an `MSA`
+question as `--msa-as-sa` writes it, since it compares the CSV beside the file
+and never writes one. The blanks after the first are among the steps by hand it
+ends with, between the import and *Add Existing*, so a quiz gets its questions
+whole; and where the CSV is missing or stale, the command it names to make it
+says `--msa-as-sa`. The web page's CSV to download is made the same way.
 
 ## Where it goes on Brightspace
 

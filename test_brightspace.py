@@ -1299,7 +1299,7 @@ if COOKIES_OK:
         # The CSV beside the file, once made, is named without a word; stale, it is said.
         subprocess.run([sys.executable, str(pathlib.Path(SCRIPT).parent / "extras" / "bs-yaml-quiz" / "bs-yaml-quiz.py"),
                         q13], check=True, capture_output=True)
-        run("setup-quiz", q13, has=["Upload a File -> q13.csv.\n"])
+        run("setup-quiz", q13, has=["Upload a File -> q13.csv.\n"], lacks=["MSA", "--msa-as-sa"])
         run("setup-quiz", q13, "--go",
             has=["created grade item 'Quiz 13'", "created quiz 'Quiz 13'",
                  "checked on the server: name, start, end, attempts, time limit, IP range, password, grade item, "
@@ -1352,6 +1352,30 @@ if COOKIES_OK:
             ok=False, has=["question 2"], lacks=["Traceback"])
         run("setup-quiz", str(qdir / "nowhere.yml"), ok=False, has=["nowhere.yml"], lacks=["Traceback"])
 
+        # An MSA question, several blanks: the CSV carries its first, as bs-yaml-quiz.py
+        # --msa-as-sa writes it, and the blanks after it are a step by hand, before
+        # the questions go into the quiz.
+        MSA_QUESTIONS = QUESTIONS + ('- title: Q3 Two names\n  type: MSA\n  text: What do they hold?\n'
+                                     '  blanks:\n  - prompt: "`x` holds"\n    answers: [3, three]\n'
+                                     '  - prompt: "`y` holds"\n    answers:\n    - 2\n    - 50: "2.0"\n')
+        q19 = quiz_yml("q19.yml", name="Quiz 19", questions=MSA_QUESTIONS)
+        before = (len(QUIZZES_MADE), len(ITEMS))
+        run("setup-quiz", q19,
+            has=["Quiz 19 in 240: 3 questions from q19.yml, worth 4",
+                 f"Upload a File -> q19.csv, which bs-yaml-quiz.py {q19} --msa-as-sa makes.\n",
+                 " 2. Question Library -> each MSA question -> the blanks after its first, which the CSV cannot "
+                 "carry:\n    question 3 (Q3 Two names): blank 1 of 2 imported\n      blank 2, for: `y` holds\n"
+                 "        2\n        2.0  [50%]\n 3. Quiz 19 -> Add Existing -> the 3 questions it imported."],
+            lacks=["blank 2, for: `x`", "Traceback"])
+        fails += (len(QUIZZES_MADE), len(ITEMS)) != before
+        subprocess.run([sys.executable, str(pathlib.Path(SCRIPT).parent / "extras" / "bs-yaml-quiz" / "bs-yaml-quiz.py"),
+                        q19, "--msa-as-sa"], check=True, capture_output=True)
+        run("setup-quiz", q19, has=["Upload a File -> q19.csv.\n", "blank 2, for: `y` holds"])
+        run("setup-quiz", q19, "--check", ok=False, has=["q19.csv", "current", "DIFFERS"], lacks=["stale"])
+        run("setup-quiz", quiz_yml("bad.yml", name="Quiz 16", questions=MSA_QUESTIONS.replace(
+            '  - prompt: "`y` holds"\n    answers:\n    - 2\n    - 50: "2.0"\n', "")),
+            ok=False, has=["question 3", "one blank is a short answer, type: SA"], lacks=["Traceback"])
+
         # The same file on the page: pasted or chosen, then checked, made or compared.
         proc, wport, first = start_web()
         here = f"127.0.0.1:{wport}"
@@ -1385,6 +1409,13 @@ if COOKIES_OK:
                   fetch(wport, here, "/setup-quiz", {"token": token, "yaml": text16, "filename": "-x.yml",
                                                      "action": "plan"}), 200,
                   has=["brightspace.py setup-quiz quiz.yml", "already has a quiz called &#x27;Quiz 16&#x27;"])
+        got = fetch(wport, here, "/setup-quiz", {"token": token, "yaml": pathlib.Path(q19).read_text(),
+                                                 "filename": "q19.yml", "action": "plan"})
+        web_check("web: an MSA question's other blanks are a step by hand, its CSV made as --msa-as-sa makes it",
+                  got, 200, has=['download="q19.csv"', "blank 2, for: `y` holds", "Upload a File -&gt; q19.csv."])
+        csv19 = base64.b64decode(re.search(r"base64,([A-Za-z0-9+/=]+)", got[1]).group(1)).decode()
+        whole19 = "<ol><li><code>x</code> holds</li><li><code>y</code> holds</li></ol>" in csv19 and "2.0" not in csv19
+        fails += not whole19; print("   the download has every prompt and the first blank's answers alone:", whole19)
         web_check("web: a file with no block says why, and offers no CSV",
                   fetch(wport, here, "/setup-quiz", {"token": token, "yaml": QUESTIONS, "action": "plan"}), 200,
                   has=["Stopped", "has no brightspace: block"], lacks=["download="])

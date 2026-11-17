@@ -437,7 +437,10 @@ beside the file is compared with what the file makes now. Every question is
 made into the CSV before anything is sent, so a quiz whose questions would not
 import is never made. bs-yaml-quiz reads the file for it, so the two never read
 one file two ways, and that makes it, with `quiz-defaults`, the commands that
-need PyYAML.
+need PyYAML. A question with [several blanks](extras/bs-yaml-quiz/README.md#several-blanks)
+is taken as `bs-yaml-quiz.py --msa-as-sa` writes it, its first blank in the
+CSV, and the run's steps by hand list the other blanks with every answer each
+takes, to add in the Question Library before *Add Existing*.
 
 **Every key of the block is a flag too**, which wins over the block, so a quiz
 whose questions are written in Brightspace needs no file:
@@ -728,8 +731,8 @@ the name is refused, as the command refuses it.
    copied into the course's sections afterwards. A field left empty is the
    course's default, shown greyed in it. A quiz's YAML file can be chosen or
    pasted instead; it is run in a directory of its own beside the CSV made from
-   it, as bs-yaml-quiz would leave it, and the page offers that CSV for the
-   Question Library's import.
+   it, as bs-yaml-quiz would leave it, with `--msa-as-sa`, and the page offers
+   that CSV for the Question Library's import.
 2. **Copy it into the sections**, `copy-quiz`: once the questions are in the
    shell. Making a quiz in a shell fills this in for it.
 3. **Course defaults**, `quiz-defaults`: each course's, and a form that saves

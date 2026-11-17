@@ -535,9 +535,11 @@ def describe(answer, where):
     return text + (f"  [{', '.join(notes)}]" if notes else "")
 
 
-def msa_steps(data, where):
-    """What --msa-as-sa leaves to do by hand: for each MSA question, the
-    blanks after its first, each with its prompt and every answer it takes."""
+def msa_by_hand(data, where):
+    """What --msa-as-sa leaves to do by hand, as lines: for each MSA question,
+    the blanks after its first, each with its prompt and every answer it
+    takes. Empty for a quiz with none. brightspace.py setup-quiz prints the
+    same lines among its own steps."""
     lines = []
     for n, q in enumerate(data["questions"], 1):
         if not (isinstance(q, dict) and q.get("type") == "MSA"):
@@ -546,13 +548,18 @@ def msa_steps(data, where):
         at = f"{where}, question {n}" + (f" ({title})" if title else "")
         blanks = msa_blanks(q, at)
         lines.append(f"question {n}" + (f" ({title})" if title else "")
-                     + f": blank 1 of {len(blanks)} imported; add the others in the Question Library")
+                     + f": blank 1 of {len(blanks)} imported")
         for i, b in enumerate(q["blanks"][1:], 2):
             lines.append(f"  blank {i}, for: {b['prompt'].strip()}")
             lines += [f"    {describe(a, at)}" for a in blanks[i - 1][1]]
-    if lines:
-        lines.insert(0, "Then by hand, since the CSV carries one blank of each MSA question:")
     return lines
+
+
+def msa_steps(data, where):
+    """msa_by_hand under a line saying where the blanks go, as a run prints them."""
+    lines = msa_by_hand(data, where)
+    return (["Then by hand, in the Question Library after the import, since the CSV carries "
+             "one blank of each MSA question:"] + lines) if lines else []
 
 
 def to_csv(data, where, msa_as_sa=False):

@@ -3338,7 +3338,13 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         except fmt.yaml.YAMLError as e:
             raise Failed(f"{path}: not YAML: {e}")
         try:
-            csv_text = fmt.to_csv(data, str(path))
+            # An MSA question, several blanks, goes into the CSV as a short answer
+            # with its first blank, and bs-yaml-quiz.py writes it so only when told
+            # --msa-as-sa. Here the CSV is only compared and counted, never written,
+            # so the question is taken that way, and the blanks after the first are
+            # among the steps by hand that quiz_remainder prints.
+            csv_text = fmt.to_csv(data, str(path), msa_as_sa=True)
+            msa = fmt.msa_by_hand(data, str(path))
         except fmt.Failed as e:
             raise Failed(str(e))
         block = data.get("brightspace") or {}
@@ -3413,11 +3419,11 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
             plan["description_html"] = fmt.md_html(plan["description"], f"{at} description")
         except fmt.Failed as e:
             raise Failed(str(e))
-    plan |= {"path": path, "questions": None, "csv_state": None}
+    plan |= {"path": path, "questions": None, "csv_state": None, "msa": []}
     if path:
         csv_path = path.with_suffix(".csv")
         have = csv_path.read_bytes().decode("utf-8") if csv_path.exists() else None
-        plan |= {"csv": csv_path, "questions": len(data["questions"]),
+        plan |= {"csv": csv_path, "questions": len(data["questions"]), "msa": msa,
                  "worth": sum(float(q.get("points", fmt.POINTS)) for q in data["questions"]),
                  "csv_state": None if have is None else "current" if have == csv_text else "stale"}
     return plan
@@ -3459,11 +3465,16 @@ def quiz_remainder(plan, template, shown):
     """What is left once setup-quiz has run, printed last so it is in front of you."""
     shell = plan.get("shell")
     if plan["path"]:
-        yml, csv_name = shown, plan["csv"].name
+        yml, csv_name = shown + (" --msa-as-sa" if plan["msa"] else ""), plan["csv"].name
         made = {"current": "", None: f", which bs-yaml-quiz.py {yml} makes",
                 "stale": f" once bs-yaml-quiz.py {yml} has made it again: it is not what the file makes now"}
-        steps = [f"Question Library -> Import -> Upload a File -> {csv_name}{made[plan['csv_state']]}.",
-                 f"{plan['name']} -> Add Existing -> the {plan['questions']} questions it imported."]
+        steps = [f"Question Library -> Import -> Upload a File -> {csv_name}{made[plan['csv_state']]}."]
+        if plan["msa"]:
+            # The CSV carries one blank of each MSA question; the rest, before the
+            # questions go into the quiz, so it gets them whole.
+            steps.append("Question Library -> each MSA question -> the blanks after its first, which the CSV "
+                         "cannot carry:\n" + "\n".join("    " + x for x in plan["msa"]))
+        steps.append(f"{plan['name']} -> Add Existing -> the {plan['questions']} questions it imported.")
     else:
         steps = [f"Its questions: {plan['name']} -> Add/Edit Questions, written there or imported\n"
                  "    into the Question Library and added with Add Existing."]
