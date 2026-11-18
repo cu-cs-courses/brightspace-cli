@@ -247,7 +247,9 @@ def inline_md(h):
     """Markdown for one paragraph's inner HTML, or None if it cannot be
     written so that it renders back to exactly this."""
     out, pos, links = [], 0, []
-    pat = re.compile(r'<code>(.*?)</code>|<(/?)(em|strong)>|<a href="([^"()\s]+)">|</a>|<[^>]*>', re.S)
+    # A tag is what inline() passes through, TAG; a < that is not one is text,
+    # escaped below, so that `a < b` beside markup comes back as written.
+    pat = re.compile(r'<code>(.*?)</code>|<(/?)(em|strong)>|<a href="([^"()\s]+)">|</a>|' + TAG.pattern, re.S)
     for m in pat.finditer(h):
         out.append(md_escape(h[pos:m.start()]))
         tag = m.group(0)
@@ -376,6 +378,35 @@ def plain(value, where, what):
     return value.strip("\n")
 
 
+ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")     # a backslash before any of PUNCT
+
+
+def inline_cell(value, where, what):
+    """(text, marker) for an option, a choice or a match: one line of inline
+    Markdown. Where the Markdown makes no markup, the text with its escapes
+    applied and no marker, so a plain cell goes in as it always has, `List<T>`
+    and all; where it does, the HTML and "HTML", D2L's marker for a cell
+    written as HTML. HTML written in a cell is text to D2L, as it always was:
+    only Markdown gets the marker, since `<Shape>` cannot be told from a tag."""
+    text = plain(value, where, what)
+    h, literal = inline(text), ESCAPE.sub(r"\1", text)
+    return (literal, "") if h == literal else (h, "HTML")
+
+
+def cell_md(text, marker, where, what):
+    """The Markdown an option, a choice or a match is written back as: for an
+    HTML cell, the Markdown that renders to it; for a plain cell, the text,
+    escaped where it would otherwise read as Markdown."""
+    if marker not in ("HTML", ""):
+        raise Failed(f"{where}: {what}'s fourth cell is HTML or nothing, not {marker!r}")
+    if marker:
+        md = inline_md(text)
+        if md is None or inline_cell(md, where, what) != (text, "HTML"):
+            raise Failed(f"{where}: {what}'s HTML cannot be written as Markdown; nothing written")
+        return md
+    return text if inline_cell(text, where, what) == (text, "") else md_escape(text)
+
+
 def answer_rows(answers, where):
     """The Answer rows of a short answer: each spelling, at 100 unless a weight
     is given, and a regular expression where regexp: says so."""
@@ -495,7 +526,7 @@ def question_rows(q, where, msa_as_sa=False):
             weight, text, rest = weighted(o, where, "options")
             if set(rest) - {"feedback"}:
                 raise Failed(f"{where}: an option takes nothing but feedback: beside its weight")
-            rows.append(["Option", weight, plain(text, where, "an option"), "",
+            rows.append(["Option", weight, *inline_cell(text, where, "an option"),
                          plain(rest.get("feedback", ""), where, "feedback")])
     if kind == "TF":
         right = truth(q.get("correct"), where, "correct")
@@ -506,10 +537,10 @@ def question_rows(q, where, msa_as_sa=False):
         rows.append(["FALSE", number(weights[1], where, "a weight"), plain(q.get("false_feedback", ""), where, "feedback")])
     if kind == "M":
         for i, c in enumerate(spliced(q.get("choices") or []), 1):
-            rows.append(["Choice", str(i), plain(c, where, "a choice")])
+            rows.append(["Choice", str(i), *inline_cell(c, where, "a choice")])
         for m in spliced(q.get("matches") or []):
             n, text, _ = weighted(m, where, "matches")
-            rows.append(["Match", n, plain(text, where, "a match")])
+            rows.append(["Match", n, *inline_cell(text, where, "a match")])
     if kind == "O":
         for item in spliced(q.get("items") or []):
             item = {"text": item} if isinstance(item, str) else item
@@ -669,21 +700,20 @@ def from_csv(text, where):
             q.setdefault("answers", []).append(
                 cells[1] if simple else {cells[0]: cells[1], **({"regexp": "true"} if cells[2] else {})})
         elif kind == "Option" and t in ("MC", "MS"):
-            if cells[2]:
-                raise Failed(f"{at}: an option's fourth cell is meant to be empty, and holds {cells[2]!r}")
             q.setdefault("options", []).append(
-                {num(cells[0]): cells[1], **({"feedback": cells[3]} if cells[3] else {})})
+                {num(cells[0]): cell_md(cells[1], cells[2], at, "an option"),
+                 **({"feedback": cells[3]} if cells[3] else {})})
         elif kind in ("TRUE", "FALSE") and t == "TF":
             only(2)
             q.setdefault("_tf", {})[kind] = (num(cells[0]), cells[1])
         elif kind == "Choice" and t == "M":
-            only(2)
+            only(3)
             if cells[0] != str(len(q.get("choices", [])) + 1):
                 raise Failed(f"{at}: choices are numbered 1, 2, 3, in order")
-            q.setdefault("choices", []).append(cells[1])
+            q.setdefault("choices", []).append(cell_md(cells[1], cells[2], at, "a choice"))
         elif kind == "Match" and t == "M":
-            only(2)
-            q.setdefault("matches", []).append({num(cells[0]): cells[1]})
+            only(3)
+            q.setdefault("matches", []).append({num(cells[0]): cell_md(cells[1], cells[2], at, "a match")})
         elif kind == "Item" and t == "O":
             only(3)
             item = {"text": cells[0], **({"format": cells[1]} if cells[1] else {}),

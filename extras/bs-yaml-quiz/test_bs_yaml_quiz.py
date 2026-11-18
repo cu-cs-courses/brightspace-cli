@@ -281,6 +281,49 @@ for h in ["<p>Use <code>a &lt; b</code>, <em>not</em> <strong>this</strong>.</p>
     back_md = bq.html_md(h)
     check(f"HTML to Markdown and back is the same: {h[:40]}...", back_md is not None and md(back_md) == h, back_md)
 
+# --- Markdown in options, choices and matches ---------------------------------------------
+yml("md-options.yml",
+    "questions:\n"
+    "- type: MS\n  text: Which hold?\n  scoring: RightAnswers\n  options:\n"
+    "  - 1: 'uses `a < b` and *not* **this**'\n"
+    "  - 0: 2.5 * 2\n"
+    "  - 0: 'a literal \\* star'\n"
+    "  - 0: a List<Shape> as written\n"
+    "- type: M\n  text: Match.\n  choices:\n  - '`List<Shape>`'\n  - plain\n"
+    "  matches:\n  - 1: '*a list*'\n  - 2: plain too\n")
+run("md-options.yml", has=["wrote md-options.csv: 2 questions"])
+r = rows("md-options.csv")
+check("an option with Markdown goes in as HTML, the HTML marker in its fourth cell",
+      ["Option", "1", "uses <code>a &lt; b</code> and <em>not</em> <strong>this</strong>", "HTML", ""] in r, r)
+check("an option without Markdown goes in as it always has, the fourth cell empty",
+      ["Option", "0", "2.5 * 2", "", ""] in r, r)
+check("a backslash writes a literal star, and the option stays plain",
+      ["Option", "0", "a literal * star", "", ""] in r, r)
+check("angle brackets outside Markdown stay plain text, as they always were",
+      ["Option", "0", "a List<Shape> as written", "", ""] in r, r)
+check("a choice and a match take Markdown the same way",
+      ["Choice", "1", "<code>List&lt;Shape&gt;</code>", "HTML", ""] in r and ["Choice", "2", "plain", "", ""] in r
+      and ["Match", "1", "<em>a list</em>", "HTML", ""] in r and ["Match", "2", "plain too", "", ""] in r, r)
+run("md-options.csv", "-o", "md-options-back.yml")
+back = (tmp / "md-options-back.yml").read_text()
+check("from the CSV, an HTML cell comes back as Markdown",
+      "uses `a < b` and *not* **this**" in back and "`List<Shape>`" in back and "*a list*" in back, back)
+run("md-options-back.yml", "-o", "md-options-back.csv")
+check("and that YAML makes the same rows",
+      bq.data_rows((tmp / "md-options-back.csv").read_text()) == bq.data_rows((tmp / "md-options.csv").read_text()))
+write_csv("star.csv", [["NewQuestion", "MC"], ["QuestionText", "<p>Pick.</p>", "HTML"], ["Points", "1"],
+                       ["Option", "100", "*stars*"], ["Option", "0", "List<Shape>"], []])
+run("star.csv", has=["wrote star.yml: 1 questions"])
+star = (tmp / "star.yml").read_text()
+check("a plain cell that would read as Markdown is escaped on the way back", "\\*stars\\*" in star, star)
+check("a plain cell with angle brackets comes back as written", "List<Shape>" in star, star)
+write_csv("raw.csv", [["NewQuestion", "MC"], ["QuestionText", "<p>Pick.</p>", "HTML"], ["Points", "1"],
+                      ["Option", "100", "<b>raw</b>", "HTML"], []])
+run("raw.csv", ok=False, has=["cannot be written as Markdown"])
+write_csv("marker.csv", [["NewQuestion", "MC"], ["QuestionText", "<p>Pick.</p>", "HTML"], ["Points", "1"],
+                         ["Option", "100", "x", "NOT HTML"], []])
+run("marker.csv", ok=False, has=["fourth cell is HTML or nothing"])
+
 # --- what it refuses ----------------------------------------------------------------------
 def refuses(name, text, says):
     yml(name, text)

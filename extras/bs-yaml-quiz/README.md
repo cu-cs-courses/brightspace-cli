@@ -65,9 +65,9 @@ question is:
 | `answers` | `SA`: every spelling that counts, one per line. D2L compares strings, so a right answer in a spelling not listed here is marked wrong. Casing does not matter: short answers are case-insensitive by default. `- 50: half right` gives a spelling partial credit, and `regexp: true` beside it makes it a regular expression. |
 | `blanks` | `MSA`: two or more, in order, each a `prompt:` and its `answers:`, which are as `SA`'s. |
 | `width`, `rows` | `SA`, `MSA`: the input box, 40 wide and 1 row when left out. `width: null` leaves the box out. |
-| `options` | `MC`, `MS`: in order, each `- <weight>: <text>`, the weight being the percent it earns. `feedback:` beside one is shown when it is chosen. Options are plain text: D2L shows them as written, so Markdown and HTML are both wrong there. |
+| `options` | `MC`, `MS`: in order, each `- <weight>: <text>`, the weight being the percent it earns. `feedback:` beside one is shown when it is chosen. An option is one line of inline Markdown: see [Options, choices and matches](#options-choices-and-matches). |
 | `correct` | `TF`: `true` or `false`. `weights: [TRUE's, FALSE's]` instead of 100 and 0, and `true_feedback` and `false_feedback`. |
-| `choices`, `matches` | `M`: choices numbered from 1 in order, and matches as `- <choice's number>: <text>`. |
+| `choices`, `matches` | `M`: choices numbered from 1 in order, and matches as `- <choice's number>: <text>`. Each is one line of inline Markdown, as an option is. |
 | `items` | `O`: in the right order, each its text, or `text:` with `format:` and `feedback:`. |
 | `scoring` | `MS`, `M`, `O`: D2L's scoring rule, such as `RightAnswers` or `EquallyWeighted`. |
 | `initial_text`, `answer_key` | `WR`: what the box starts with, and the grader's key. |
@@ -108,6 +108,31 @@ so that the CSV is the same every time and the same as one written by hand:
 
 `html:` in place of `text:` takes the question's HTML as it goes into the CSV,
 and `plain_text:` takes text that D2L is to show without reading HTML at all.
+
+## Options, choices and matches
+
+An option of an `MC` or `MS` question, and a choice or a match of an `M`
+question, is one line of inline Markdown, read as a paragraph's inline is:
+`` `code` ``, `*emphasis*`, `**strong**`, a link, and a backslash before
+punctuation to write it literally. Where the Markdown makes no markup, the
+text goes into the CSV as written with nothing in its fourth cell, exactly as
+it always has; where it does, the cell holds the HTML and the fourth cell says
+`HTML`, D2L's marker for an option, a choice or a match written as HTML. So an
+existing quiz makes the same CSV as before, unless an option of its happened
+to read as Markdown: `x*y*z` is `x`, then `y` in italics, then `z`, and wants
+`x\*y\*z`.
+
+Unlike a question's text, a cell does not take HTML: `<b>x</b>` written in an
+option is shown as written, as it always was, because `List<Shape>` cannot be
+told from a tag and has to stay text. In a cell with Markdown, D2L reads the
+whole cell as HTML, so put a `List<Shape>` there in a code span.
+
+A program never goes in an option. One line of code is a code span; a program
+goes in the question's text, labelled, and the options name the labels.
+
+Going back from a CSV, an `HTML` cell is written as the Markdown that renders
+to it, and refused where Markdown cannot say it; a plain cell that would read
+as Markdown is escaped, `\*stars\*`, so that it comes out as written.
 
 ## Several blanks
 
@@ -241,8 +266,11 @@ tool handles and one of which it cannot:
 - **Each program is one line of HTML.** A CSV cell may hold a newline, but
   D2L's parser is an unknown, and a newline it dropped would run a program's
   lines together.
-- **Options cannot carry HTML.** The option's text sits where the marker would
-  have to go.
+- **An option written as HTML needs `HTML` in its fourth cell**, as a choice
+  or a match does and an ordering item in its third, or D2L shows the tags
+  as text. A plain option leaves the cell empty. Measured on a sandbox,
+  2026-11-18: code spans, emphasis, links and a bare `<` beside them all
+  render, in options, choices and matches alike.
 - **A short answer has one box.** Brightspace's own questions can have several
   blanks, each with answers of its own, but the CSV cannot say which blank an
   answer belongs to: two `InputBox` rows import as a single box that takes
