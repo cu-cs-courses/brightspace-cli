@@ -450,6 +450,16 @@ end are times of day and `--date` says which day. The quiz copies its settings
 from the quiz `like` names, or else from the one numbered before it, `Quiz 5`
 for `Quiz 6`, or else from the course's last quiz.
 
+**LockDown and visibility are keys of the block**, `lockdown`,
+`lockdown_domains` and `visible`, flags of the same names, and `--go` takes
+every step the API has no route for through
+[`extras/bs-drive/`](extras/bs-drive/README.md) when `chromium` is on `PATH`
+and Python has `websocket-client`: the questions in, the blanks, Add Existing,
+LockDown and its sites, then the quiz shown. `--by-hand`, or
+`BRIGHTSPACE_BY_HAND` set, prints them instead. Respondus renames a quiz it
+guards, *Quiz 9- Requires Respondus LockDown Browser*, and `setup-quiz` and
+`--check` find it under either name.
+
 **`--shell` makes it in an empty shell instead**, the first of two steps for a
 course taught as several sections, whose defaults name them. Its settings come
 from the first section's quiz numbered before it, since the shell has none;

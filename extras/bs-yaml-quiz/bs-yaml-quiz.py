@@ -603,9 +603,14 @@ def to_csv(data, where, msa_as_sa=False):
     block = data.get("brightspace")
     # What the keys mean is brightspace.py's, which refuses one it does not know;
     # here the block only has to be a block, so the CSV never depends on it.
+    # One key takes a list: lockdown_domains, the sites LockDown Browser lets a
+    # student open, which reads best one to a line.
     if not isinstance(block, (dict, type(None))) or any(
-            not isinstance(v, str) for v in (block or {}).values()):
-        raise Failed(f"{where}: `brightspace:` is a block of `key: value` lines, each value text")
+            not (isinstance(v, str) or (k == "lockdown_domains" and isinstance(v, list)
+                                        and all(isinstance(x, str) for x in v)))
+            for k, v in (block or {}).items()):
+        raise Failed(f"{where}: `brightspace:` is a block of `key: value` lines, each value text, "
+                     "but lockdown_domains, which may be a list")
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
     for n, q in enumerate(data["questions"], 1):

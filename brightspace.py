@@ -95,7 +95,9 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import time
 import threading
@@ -3205,7 +3207,12 @@ def cmd_setup(args):
 
 # A quiz's keys: its brightspace: block, and setup-quiz's flags of the same names.
 QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
-             "points", "grade_item", "description", "shell", "calendar", "special_access_only")
+             "points", "grade_item", "description", "shell", "calendar", "special_access_only",
+             "lockdown", "lockdown_domains", "visible")
+# Respondus appends this to the name of a quiz it guards, so a quiz set up with
+# lockdown: true is found by either name afterwards.
+LOCKDOWN_SUFFIX = "- Requires Respondus LockDown Browser"
+HOST = re.compile(r"(?i)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
 # A course's defaults: a quiz's keys but the first three, start and end as times
 # of day, and two for a course taught as several sections: which they are, and
 # the grade item each section's copy is shaped like where it has none of the
@@ -3261,8 +3268,14 @@ def check_value(key, value, at):
     if key in ("minutes", "attempts") and not re.fullmatch(r"[1-9]\d*", value):
         raise Failed(f"{at} {key}: is a whole number, not {value!r}"
                      + (" -- or none, for a quiz with no time limit" if key == "minutes" else ""))
-    if key in ("calendar", "special_access_only") and value.strip().lower() not in TRUTH | FALSITY:
+    if key in ("calendar", "special_access_only", "lockdown", "visible") and value.strip().lower() not in TRUTH | FALSITY:
         raise Failed(f"{at} {key}: is true or false, not {value!r}")
+    if key == "lockdown_domains":
+        hosts = domain_list(value)
+        bad = [h for h in hosts if not HOST.fullmatch(h)]
+        if not hosts or bad:
+            raise Failed(f"{at} lockdown_domains: are host names like cu-cs-courses.site, as a list or one line "
+                         f"with commas, not {', '.join(map(repr, bad)) if bad else repr(value)}")
     if key == "points" and not re.fullmatch(r"\d+(\.\d+)?", value):
         raise Failed(f"{at} points: is a number, not {value!r}")
     if key == "ip" and not re.fullmatch(r"[\d.]+\s*-\s*[\d.]+", value):
@@ -3274,6 +3287,17 @@ def check_value(key, value, at):
             dt.date.fromisoformat(value)
         except ValueError:
             raise Failed(f"{at} date: is a day like 2026-10-12, not {value!r}")
+
+
+def domain_list(value):
+    """The hosts in a lockdown_domains value: a line with commas, or what a list
+    became when it was joined into one."""
+    return [x for x in re.split(r"[,\s]+", value or "") if x]
+
+
+def quiz_named(have, want):
+    """A quiz's name is the one asked for, or that with Respondus's suffix."""
+    return same_name(have, want) or same_name(have, want + LOCKDOWN_SUFFIX)
 
 
 def section_labels(value):
@@ -3352,6 +3376,10 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         except fmt.Failed as e:
             raise Failed(str(e))
         block = data.get("brightspace") or {}
+        if isinstance(block, dict) and isinstance(block.get("lockdown_domains"), list):
+            # a YAML list is the natural way to write several hosts; the rest of the
+            # plan carries values as text, so it is one line with commas from here
+            block = dict(block, lockdown_domains=", ".join(str(x).strip() for x in block["lockdown_domains"]))
         if not block and "course" not in flags:
             raise Failed(f"{path} has no brightspace: block to say which course the quiz goes in and when "
                          "it runs; extras/bs-yaml-quiz/README.md has its keys")
@@ -3383,9 +3411,16 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     else:
         plan["item"] = True
     plan["used"] = used
-    for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only"):
+    for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only",
+                "lockdown", "lockdown_domains", "visible"):
         if key in plan:
             check_value(key, plan[key], at)
+    if "lockdown_domains" in plan:
+        if "lockdown" in plan and not as_flag(plan["lockdown"]):
+            raise Failed(f"{at} lockdown_domains: are the sites LockDown Browser lets a student open, "
+                         "and lockdown: false turns LockDown Browser off")
+        plan["lockdown_domains"] = ", ".join(domain_list(plan["lockdown_domains"]))
+        plan.setdefault("lockdown", "true")
     day = plan.get("date")
     for key in ("start", "end"):
         if key not in plan:
@@ -3423,7 +3458,7 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
             plan["description_html"] = fmt.md_html(plan["description"], f"{at} description")
         except fmt.Failed as e:
             raise Failed(str(e))
-    plan |= {"path": path, "questions": None, "csv_state": None, "msa": []}
+    plan |= {"path": path, "questions": None, "csv_state": None, "msa": [], "csv_text": csv_text}
     if path:
         csv_path = path.with_suffix(".csv")
         have = csv_path.read_bytes().decode("utf-8") if csv_path.exists() else None
@@ -3460,15 +3495,28 @@ def quiz_summary(plan, template=None):
         item = "no grade item"
     lines = [f"{plan['name']} {where}: {has}", f"  {when}",
              f"  {copied}; {item}" + ("; a description" if "description" in plan else "")]
+    extras = []
+    if "lockdown" in plan:
+        n = len(domain_list(plan.get("lockdown_domains")))
+        extras.append(("LockDown Browser required, " + (f"{n} site{'s' if n != 1 else ''} allowed" if n
+                                                        else "no other site allowed"))
+                      if as_flag(plan["lockdown"]) else "LockDown Browser not required")
+    if "visible" in plan:
+        extras.append("made visible once its questions are in" if as_flag(plan["visible"]) else "left hidden")
+    if extras:
+        lines.append("  " + "; ".join(extras))
     if plan["used"]:
         lines.append(f"  from {plan['course']}'s defaults: {', '.join(plan['used'])}")
     return "\n".join(lines) + "\n"
 
 
-def quiz_remainder(plan, template, shown):
-    """What is left once setup-quiz has run, printed last so it is in front of you."""
+def quiz_remainder(plan, template, shown, done=()):
+    """What is left once setup-quiz has run, printed last so it is in front of you.
+    done names the steps bs-drive has already taken: questions, lockdown, visible."""
     shell = plan.get("shell")
-    if plan["path"]:
+    if "questions" in done:
+        steps = []
+    elif plan["path"]:
         yml, csv_name = shown + (" --msa-as-sa" if plan["msa"] else ""), plan["csv"].name
         made = {"current": "", None: f", which bs-yaml-quiz.py {yml} makes",
                 "stale": f" once bs-yaml-quiz.py {yml} has made it again: it is not what the file makes now"}
@@ -3482,10 +3530,17 @@ def quiz_remainder(plan, template, shown):
     else:
         steps = [f"Its questions: {plan['name']} -> Add/Edit Questions, written there or imported\n"
                  "    into the Question Library and added with Add Existing."]
+    if "lockdown" in plan and "lockdown" not in done:
+        steps.append(("LockDown Browser tab -> the quiz's row -> Settings -> Require LockDown Browser"
+                      + (f"; Advanced Settings -> allow access to external domains, one line with commas:\n"
+                         f"    {plan['lockdown_domains']}" if plan.get("lockdown_domains") else ".")
+                      ) if as_flag(plan["lockdown"]) else
+                     "LockDown Browser tab -> the quiz's row -> Settings -> Don't require LockDown Browser.")
     steps.append("Submission views, if students are to see more after an attempt than the default:\n"
                  f"    none came from {template!r}, since no route reads or writes them.")
-    steps.append("Make it visible to students, if the copies are to be: each keeps the shell's." if shell
-                 else "Make it visible to students, once it has its questions.")
+    if "visible" not in done and as_flag(plan.get("visible", "true")):
+        steps.append("Make it visible to students, if the copies are to be: each keeps the shell's." if shell
+                     else "Make it visible to students, once it has its questions.")
     lines = [f"Then by hand, in {shell}, since no API route does these:" if shell
              else "Then by hand, since no API route does these:"]
     lines += [f" {n}. {step}" for n, step in enumerate(steps, 1)]
@@ -3503,15 +3558,16 @@ def shell_quote(text):
     return text if re.fullmatch(r"[\w.,:/=+-]+", text) else "'" + text.replace("'", "'\\''") + "'"
 
 
-def check_quiz(s, ou, plan):
+def check_quiz(s, ou, plan, by_hand=False):
     """Brightspace beside the quiz's file, flags and defaults. True when nothing differs."""
     rows = []
     def row(what, want, got, same=None):
         rows.append([what, want, got, "" if (want == got if same is None else same) else "DIFFERS"])
     le, _ = s.versions()
-    hits = [q for q in s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/") if same_name(q["Name"], plan["name"])]
+    hits = [q for q in s.objects(f"/d2l/api/le/{le}/{ou}/quizzes/") if quiz_named(q["Name"], plan["name"])]
     q = hits[0] if len(hits) == 1 else None
-    row("quiz", plan["name"], q["Name"] if q else f"{len(hits)} of that name" if hits else "(none)")
+    row("quiz", plan["name"], q["Name"] if q else f"{len(hits)} of that name" if hits else "(none)",
+        bool(q))    # under Respondus's suffix too, once LockDown is required
     if q:
         for what, key, field in (("opens", "start", "StartDate"), ("closes", "end", "EndDate")):
             want = plan.get(key)
@@ -3546,11 +3602,100 @@ def check_quiz(s, ou, plan):
             want, got = text_pair(plan["description_html"], text_of((q.get("Description") or {}).get("Text")))
             cut = lambda t: t if len(t) <= 32 else t[:31] + "…"
             row("description", cut(want), cut(got) or "(none)", want == got)
-        rows.append(["visible", "", yes_no(q.get("IsActive")), ""])
+        if "visible" in plan:
+            row("visible", yes_no(as_flag(plan["visible"])), yes_no(q.get("IsActive")))
+        else:
+            rows.append(["visible", "", yes_no(q.get("IsActive")), ""])
+        if "lockdown" in plan:
+            why = drive_unready(s, by_hand)
+            got = None if why else drive_read_lockdown(s, ou, q["Name"])
+            want = "required" if as_flag(plan["lockdown"]) else "not required"
+            if got is None:
+                row("LockDown Browser", want, f"(not read: {why or 'bs-drive failed'})", True)
+            else:
+                row("LockDown Browser", want, "required" if got.get("required") else "not required")
+                if as_flag(plan["lockdown"]):
+                    have = (got.get("domains") or "") if got.get("allow") else ""
+                    row("LockDown sites", plan.get("lockdown_domains") or "(none)", have or "(none)")
     if plan["csv_state"]:
         row(plan["csv"].name, "current", plan["csv_state"])
     table(["", "the plan says", "Brightspace has", ""], rows)
     return not any(r[3] for r in rows)
+
+
+DRIVE = pathlib.Path(__file__).resolve().parent / "extras" / "bs-drive" / "bs-drive.py"
+
+
+def drive_unready(s, by_hand=False):
+    """Why bs-drive cannot take the steps the API has no route for, here and
+    now; None when it can. It drives the real web page in a headless Chromium,
+    so a test double, a machine without a browser, or --by-hand leaves them
+    printed for a person instead."""
+    if by_hand or os.environ.get("BRIGHTSPACE_BY_HAND"):
+        return "--by-hand" if by_hand else "BRIGHTSPACE_BY_HAND is set, as the web page sets it"
+    if urllib.parse.urlsplit(s.base).scheme != "https":
+        return "the host is not https, so not Brightspace's web page"
+    if not DRIVE.exists():
+        return f"no {DRIVE}"
+    if not shutil.which("chromium"):
+        return "no chromium on PATH (nix-shell -p chromium python3Packages.websocket-client)"
+    if importlib.util.find_spec("websocket") is None:
+        return "no websocket-client in this Python"
+    return None
+
+
+def drive(s, *argv):
+    """bs-drive with argv, as this session acts, its output shown as it comes.
+    True when it says it did what it was asked, read back."""
+    env = dict(os.environ, BS_HOST=urllib.parse.urlsplit(s.base).hostname)
+    print(f"\n$ bs-drive.py {' '.join(shell_quote(a) for a in argv)}", flush=True)
+    return subprocess.run([sys.executable, str(DRIVE), *argv], env=env).returncode == 0
+
+
+def drive_read_lockdown(s, ou, name):
+    """The quiz's LockDown setting, as bs-drive reads it off the Respondus page:
+    {required, allow, domains}, or None when it could not."""
+    env = dict(os.environ, BS_HOST=urllib.parse.urlsplit(s.base).hostname)
+    r = subprocess.run([sys.executable, str(DRIVE), "lockdown", str(ou), name, "--json"],
+                       env=env, capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else None
+    except (ValueError, IndexError):
+        return None
+
+
+def drive_steps(plan, ou):
+    """[(the step's key, bs-drive's argv)] for what setup-quiz cannot do through
+    the API: the questions, in three verbs, then LockDown Browser."""
+    steps = []
+    if plan["path"]:
+        section = plan["name"]
+        steps.append(("questions", ["import", str(ou), str(plan["csv"]), "--section", section, "--go"]))
+        if plan["msa"]:
+            steps.append(("questions", ["blanks", str(ou), str(plan["path"]), "--section", section, "--go"]))
+        steps.append(("questions", ["add", str(ou), plan["name"], str(plan["csv"]), "--section", section, "--go"]))
+    if "lockdown" in plan:
+        if as_flag(plan["lockdown"]):
+            steps.append(("lockdown", ["lockdown", str(ou), plan["name"], "--go"]
+                          + (["--domains", plan["lockdown_domains"]] if plan.get("lockdown_domains") else [])))
+        else:
+            steps.append(("lockdown", ["lockdown", str(ou), plan["name"], "--off", "--go"]))
+    return steps
+
+
+def show_quiz(s, ou, quiz_id):
+    """Make a quiz visible to students, through the API, and read it back."""
+    le, _ = s.versions()
+    before = quiz_detail(s, ou, str(quiz_id))
+    if before.get("IsActive"):
+        return True
+    s.send("PUT", f"/d2l/api/le/{le}/{ou}/quizzes/{quiz_id}", quiz_update_payload(before) | {"IsActive": True})
+    after = quiz_detail(s, ou, str(quiz_id))
+    kept = [k for k in ("StartDate", "EndDate", "DueDate", "GradeItemId", "SubmissionTimeLimit", "AttemptsAllowed")
+            if before.get(k) != after.get(k)]
+    print(f"\nvisible to students: {yes_no(after.get('IsActive'))}"
+          + (f"; CHANGED by the update: {', '.join(kept)}" if kept else ""))
+    return bool(after.get("IsActive")) and not kept
 
 
 def pick_template(s, ou, quizzes, plan, label):
@@ -3600,6 +3745,7 @@ def cmd_setup_quiz(args):
     if args.go and args.check:
         raise Failed("--go or --check, not both")
     flags = {k: getattr(args, k) for k in QUIZ_KEYS if getattr(args, k, None) is not None}
+    flags = {k: (str(v).lower() if isinstance(v, bool) and k != "grade_item" else v) for k, v in flags.items()}
     plan = quiz_plan(pathlib.Path(args.file).expanduser() if args.file else None, flags)
     shell = plan.get("shell")
     target = shell or plan["course"]
@@ -3607,7 +3753,7 @@ def cmd_setup_quiz(args):
     s, ou, _ = course(args)
     if args.check:
         print(quiz_summary(plan))
-        if not check_quiz(s, ou, plan):
+        if not check_quiz(s, ou, plan, args.by_hand):
             sys.exit(1)
         return
     le, _ = s.versions()
@@ -3619,7 +3765,7 @@ def cmd_setup_quiz(args):
         if quizzes:
             raise Failed(f"{shell} holds {len(quizzes)} quizzes ({', '.join(repr(x['Name']) for x in quizzes)}): "
                          "a shell starts empty, since copying it takes every quiz in it")
-    elif any(same_name(q["Name"], plan["name"]) for q in quizzes):
+    elif any(quiz_named(q["Name"], plan["name"]) for q in quizzes):
         raise Failed(f"{target} already has a quiz called {plan['name']!r}; --check reads it back")
     from_label = plan["template_course"]
     from_ou = course_site(from_label).ou if from_label != target else ou
@@ -3650,7 +3796,7 @@ def cmd_setup_quiz(args):
                                             category=None, weight=None, folder=None))
             print()
             attach = plan["name"] if args.go else None
-    make_quiz(argparse.Namespace(**common, like=None, start=plan.get("start"), end=plan.get("end"),
+    made = make_quiz(argparse.Namespace(**common, like=None, start=plan.get("start"), end=plan.get("end"),
                                  minutes=plan.get("minutes"), attempts=plan.get("attempts", "1"),
                                  ip=plan.get("ip"), password=plan.get("password"), grade_item=attach,
                                  calendar=plan.get("calendar"), special_access_only=plan.get("special_access_only"),
@@ -3660,7 +3806,39 @@ def cmd_setup_quiz(args):
               item_hint=("a shell's has nowhere to send scores; each copy goes to its section's" if shell else
                          "the plan says grade_item: none" if not plan["item"] else
                          "--go attaches the one made above, which a plan cannot name"))
-    print("\n" + quiz_remainder(plan, template["Name"], args.file))
+    why = drive_unready(s, args.by_hand)
+    steps = [] if why else drive_steps(plan, ou)
+    done = set()
+    if steps and not args.go:
+        print("\nThen, with --go, bs-drive takes the steps the API has no route for:")
+        for _, argv in steps:
+            print(f"    bs-drive.py {' '.join(shell_quote(a) for a in argv)}")
+        if as_flag(plan.get("visible")) and plan["path"]:
+            print("    and the quiz is made visible, through the API, once its questions are in")
+        done = {key for key, _ in steps} | ({"visible"} if as_flag(plan.get("visible")) and plan["path"] else set())
+    elif steps:
+        if plan["path"] and plan["csv_state"] != "current":
+            plan["csv"].write_text(plan["csv_text"], encoding="utf-8", newline="")
+            print(f"\nwrote {plan['csv'].name}, what bs-yaml-quiz.py makes of {plan['path'].name}"
+                  + (" with --msa-as-sa" if plan["msa"] else ""))
+        failed = None
+        for key, argv in steps:
+            if not drive(s, *argv):
+                failed = argv[0]
+                break
+            done.add(key)
+        if failed:
+            done.discard("questions" if failed in ("import", "blanks", "add") else failed)
+            print(f"\nbs-drive stopped at {failed}; what it did before that is in place and read back.")
+        elif as_flag(plan.get("visible")) and plan["path"] and made:
+            if show_quiz(s, ou, made["QuizId"]):
+                done.add("visible")
+    elif why and (plan["path"] or "lockdown" in plan):
+        print(f"\nbs-drive does not take the steps by hand here: {why}.")
+    print("\n" + quiz_remainder(plan, template["Name"], args.file, done))
+    wanted = {k for k, _ in steps} | ({"visible"} if steps and as_flag(plan.get("visible")) and plan["path"] else set())
+    if args.go and not done >= wanted:
+        sys.exit(1)
 
 
 def yaml_scalar(text):
@@ -4426,6 +4604,14 @@ def main(argv=None):
                    help="a grade item of the quiz's name, or with --no-grade-item none")
     x.add_argument("--description", help="what students read before they start, in Markdown")
     x.add_argument("--shell", help="make it in this empty shell, to copy into the course's sections after")
+    x.add_argument("--lockdown", action=argparse.BooleanOptionalAction,
+                   help="require LockDown Browser, or with --no-lockdown not")
+    x.add_argument("--lockdown-domains", dest="lockdown_domains",
+                   help="the sites LockDown Browser lets a student open, one line with commas")
+    x.add_argument("--visible", action=argparse.BooleanOptionalAction,
+                   help="show it to students once its questions are in, or with --no-visible leave it hidden")
+    x.add_argument("--by-hand", dest="by_hand", action="store_true",
+                   help="print the steps the API cannot take, instead of having bs-drive take them")
     x.add_argument("--go", action="store_true", help="make them; without it, print what would be sent")
     x.add_argument("--check", action="store_true", help="read them back and compare them with the plan")
     x.set_defaults(fn=cmd_setup_quiz)

@@ -107,14 +107,25 @@ already is refused rather than added twice, and the readback is the quiz's own
 list, each title exactly once. The quiz gets the questions themselves, not the
 section as a titled part of it.
 
-With `setup-quiz` for the quiz itself, a quiz goes in from its YAML with no hand
-step:
+**`setup-quiz --go` runs these itself**, after it makes the quiz, so a quiz
+goes in from its YAML in one call, LockDown and visibility included, from the
+block's `lockdown`, `lockdown_domains` and `visible`:
 
     brightspace.py setup-quiz q9.yml --go
+
+It prints the `bs-drive` commands as it runs them, stops at the first that does
+not read back as asked, and says what is left. Bare, it prints them as the
+plan. Run by hand, they are:
+
     bs-yaml-quiz.py q9.yml --msa-as-sa
-    bs-drive.py import 120 q9.csv --section 'Quiz 9' --go
-    bs-drive.py blanks 120 q9.yml --section 'Quiz 9' --go
-    bs-drive.py add    120 'Quiz 9' q9.csv --section 'Quiz 9' --go
+    bs-drive.py import   120 q9.csv --section 'Quiz 9' --go
+    bs-drive.py blanks   120 q9.yml --section 'Quiz 9' --go
+    bs-drive.py add      120 'Quiz 9' q9.csv --section 'Quiz 9' --go
+    bs-drive.py lockdown 120 'Quiz 9' --domains 'cu-cs-courses.site, docs.oracle.com' --go
+
+`setup-quiz --check` reads LockDown back through `lockdown --json`. The web page
+sets `BRIGHTSPACE_BY_HAND`, since five minutes is longer than a request
+should wait.
 
 Proved on 2026-11-19 in the 120 Devshell with 115's Quiz 12 in-class YAML,
 seven questions of which two have two blanks: the quiz-questions API read back
@@ -189,6 +200,12 @@ the same things.
   dialog's *select all* box by itself, which is the dialog's own bookkeeping
   and not a section ticked. A section opens with the button labeled *Expand
   <name> section*.
+- **On a quiz never required before, LockDown's Advanced Settings appears only
+  once Require is chosen, folded,** and its boxes are in the page but not on the
+  screen. A click on one there lands on nothing: the first one-call trial saved
+  LockDown required with no sites. The verb opens the section until the box is
+  on the screen, by its size and `offsetParent`, and checks the box and the
+  typed line before Save.
 - **The quiz-questions API reads a short answer's blanks**: `QuestionInfo`'s
   `Blanks`, each with its `Answers` and an `EvaluationType`. It covers only
   questions already in a quiz; the library has no read route.

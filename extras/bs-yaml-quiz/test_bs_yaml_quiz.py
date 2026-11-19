@@ -345,6 +345,11 @@ refuses("list.yml", "brightspace:\n- Quiz 4\nquestions:\n- type: SA\n  text: Hi.
         "`brightspace:` is a block of `key: value` lines")
 refuses("nested.yml", "brightspace:\n  name:\n    first: Quiz\nquestions:\n- type: SA\n  text: Hi.\n  answers: [x]\n",
         "each value text")
+refuses("listed.yml", "brightspace:\n  name: [Quiz, 4]\nquestions:\n- type: SA\n  text: Hi.\n  answers: [x]\n",
+        "but lockdown_domains, which may be a list")
+yml("sites.yml", "brightspace:\n  name: Quiz 4\n  lockdown_domains:\n  - a.org\n  - b.edu\n"
+                "questions:\n- type: SA\n  text: Hi.\n  answers: [x]\n")
+run("sites.yml", has=["wrote"])
 write_csv("unknown.csv", [["NewQuestion", "SA"], ["QuestionText", "<p>Hi.</p>", "HTML"], ["Bogus", "1"], []])
 run("unknown.csv", ok=False, has=["a 'Bogus' row is not one this tool knows"])
 

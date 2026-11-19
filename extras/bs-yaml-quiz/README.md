@@ -247,6 +247,9 @@ brightspace:
 | `calendar` | `false` keeps its dates out of the course calendar. The copied quiz's when left out. |
 | `special_access_only` | `true` shows it only to users given special access, which the UI adds. For a sitting meant for one student: made this way, there is no moment at which the course sees it. |
 | `shell` | Make it in this empty shell, to copy into the course's sections afterwards. |
+| `lockdown` | `true` requires Respondus LockDown Browser, `false` turns it off. The copied quiz's setting when left out. |
+| `lockdown_domains` | The sites LockDown Browser lets a student open, as a list, one to a line, or one line with commas: host names, `cu-cs-courses.site`, never an address with `https://`. Gives `lockdown: true` when that is left out, and is refused beside `lockdown: false`. Without it, a required LockDown lets no other site open. |
+| `visible` | `true` shows the quiz to students once its questions are in; `false` leaves it hidden. Left out, it is left hidden and the steps end by saying to show it. |
 
 Whatever the block leaves out comes from the course's quiz defaults, a file of
 blocks in these same keys, and `setup-quiz` takes each key as a flag too;
@@ -254,9 +257,28 @@ brightspace-cli's README has both.
 
 **No student's name in a name, a description or a header.** Brightspace once emailed a hidden quiz's name the moment it was made, for a reason not pinned down, so names stay off activities altogether: `setup-quiz`, `new-quiz`, `set-quiz`, `new-item` and `new-folder` refuse any classlist student's first or last name, and a sitting for one student is theirs by `special_access_only`, never by its name.
 
-The quiz is made hidden, to be shown once its questions are in. Those go in by
-hand, from the CSV, since no API route creates a question; `setup-quiz` ends
-by saying how.
+The quiz is made hidden, to be shown once its questions are in. No API route
+creates a question, nor sets LockDown Browser, so **`setup-quiz --go` hands
+those to [`bs-drive`](../bs-drive/README.md)** when it can drive a browser: it
+writes the CSV, imports it into a library section named for the quiz, adds the
+blanks of each `MSA` question, puts the questions in the quiz, sets LockDown
+and its sites, and then shows the quiz if `visible: true`, each step read back
+before the next. One call, about five and a half minutes for a two-question
+quiz with one `MSA` question, LockDown and two sites, on 2026-11-19. Where it
+cannot, `chromium` not on `PATH` or `--by-hand`, the same steps are printed for
+a person, the sites as one line with commas, which is how Respondus's box takes
+them.
+
+```yaml
+brightspace:
+  course: 120
+  name: Quiz 9
+  lockdown: true
+  lockdown_domains:
+  - cu-cs-courses.site
+  - docs.oracle.com
+  visible: true
+```
 
 ## What the CSV has to get right
 

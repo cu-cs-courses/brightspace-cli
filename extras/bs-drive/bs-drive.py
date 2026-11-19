@@ -436,8 +436,6 @@ def verb_lockdown(a):
     domains = ", ".join(d.strip() for d in re.split(r"[,\n]", a.domains or "") if d.strip())
     if a.off and domains:
         sys.exit("--off takes no --domains")
-    if not a.off and not domains:
-        sys.exit("--domains 'a.org, b.edu' (one comma-separated line, as exam.py header prints it), or --off")
     b, p = session(ou, qi, height=1400, respondus=True)
     try:
         rows = respondus_row(p, name)
@@ -446,6 +444,8 @@ def verb_lockdown(a):
         print("row now:", rows[0])
         open_settings(p, name)
         have = read_lockdown(p)
+        if a.json:
+            print(json.dumps(have)); return
         print(f"now: required={have['required']} external domains allowed={have['allow']} domains={have['domains']!r}")
         if "\n" in (have["domains"] or ""):
             print("  (stored with newlines: LockDown then opens each site's first page and nothing behind it)")
@@ -453,15 +453,35 @@ def verb_lockdown(a):
             print(f"would set: required={not a.off} domains={domains!r}; nothing written; add --go"); return
         p.click_pred(f"""e => e.tagName === 'INPUT' && e.name === 'ldbEnabled' && e.value === {json.dumps('false' if a.off else 'true')}""", settle=2, what="the Require radio")
         if not a.off:
-            if not have["allow"]:
-                p.click_pred("""e => e.tagName === 'INPUT' && e.id === 'allowExternalDomains'""", settle=2, what="allow external domains")
-            r = b.eval("""(() => { const e = findAll(e => e.tagName === 'TEXTAREA' && e.id === 'externalDomains')[0]; if (!e) return null;
-                          e.scrollIntoView({block: 'center'}); e.focus(); e.select(); return absOf(e); })()""")
-            if not r:
-                sys.exit("the external domains box did not appear")
+            # On a quiz never required before, Advanced Settings appears only now,
+            # folded, and its boxes are in the page but not on the screen: a click
+            # on one then lands on nothing. So it is opened until the box is shown.
+            ALLOW = "findAll(e => e.tagName === 'INPUT' && e.id === 'allowExternalDomains')[0]"
+            shown = lambda js: b.eval(f"(() => {{ const e = {js}; if (!e) return false; const r = e.getBoundingClientRect(); "
+                                      "return r.width > 0 && r.height > 0 && e.offsetParent !== null; })()")
+            for _ in range(2):
+                if shown(ALLOW):
+                    break
+                p.click_pred("""e => e.tagName === 'A' && /Advanced Settings/i.test(e.textContent || '') && e.getBoundingClientRect().width > 0""",
+                             settle=3, must=False)
+            if not shown(ALLOW):
+                sys.exit("the box allowing other sites is not on the screen; nothing saved")
+            ticked = b.eval(f"{ALLOW}.checked")
+            if bool(domains) != bool(ticked):     # ticked for sites, unticked for none
+                r = b.eval(f"(() => {{ const e = {ALLOW}; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()")
+                b.click_xy(r["x"], r["y"]); time.sleep(2)
+                if bool(b.eval(f"{ALLOW}.checked")) != bool(domains):
+                    sys.exit("the box allowing other sites did not change; nothing saved")
+        if not a.off and domains:
+            BOX = "findAll(e => e.tagName === 'TEXTAREA' && e.id === 'externalDomains')[0]"
+            if not shown(BOX):
+                sys.exit("the box for the sites did not appear; nothing saved")
+            r = b.eval(f"""(() => {{ const e = {BOX}; e.scrollIntoView({{block: 'center'}}); e.focus(); e.select(); return absOf(e); }})()""")
             b.click_xy(r["x"], r["y"]); time.sleep(0.5)
             b.eval("""(() => { const e = findAll(e => e.tagName === 'TEXTAREA' && e.id === 'externalDomains')[0]; e.value = ''; e.focus(); })()""")
             b.insert(domains); time.sleep(1)
+            if b.eval(f"{BOX}.value").strip() != domains:
+                sys.exit(f"the sites box reads {b.eval(f'{BOX}.value')!r}, not {domains!r}; nothing saved")
         p.click_pred("""e => (e.tagName === 'INPUT' || e.tagName === 'BUTTON' || e.tagName === 'A') && /Save \\+ Close/.test(e.value || e.textContent || '')""", settle=10, what="Save + Close")
         print("row after save:", (respondus_row(p, name) or ["?"])[0])
     finally:
@@ -474,7 +494,8 @@ def verb_lockdown(a):
     finally:
         b.close()
     print(f"checked on the server: required={got['required']} external domains allowed={got['allow']} domains={got['domains']!r}")
-    ok = (got["required"] is (not a.off)) and (a.off or (got["domains"] == domains and got["allow"]))
+    ok = (got["required"] is (not a.off)) and (a.off or (got["domains"] == domains and got["allow"] if domains
+                                                    else not got["allow"]))
     if not ok:
         sys.exit(1)
 
@@ -949,7 +970,9 @@ def main():
     s.add_argument("--hidden", action="store_true", help="hide it (the default makes it visible)"); s.set_defaults(fn=verb_visible)
     s = sub.add_parser("lockdown", help="require LockDown Browser, with its allowed domains"); common(s)
     s.add_argument("--domains", help="one comma-separated line, as exam.py header prints it")
-    s.add_argument("--off", action="store_true", help="LockDown not required"); s.set_defaults(fn=verb_lockdown)
+    s.add_argument("--off", action="store_true", help="LockDown not required")
+    s.add_argument("--json", action="store_true", help="print the setting as JSON and change nothing")
+    s.set_defaults(fn=verb_lockdown)
     s = sub.add_parser("special-access", help="put one user on the quiz's special access list"); common(s)
     s.add_argument("--user", required=True, help="the name as the classlist shows it, 'First Last'")
     s.add_argument("--only", action="store_true", help="and allow only users with special access"); s.set_defaults(fn=verb_special_access)

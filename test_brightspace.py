@@ -1339,9 +1339,31 @@ if COOKIES_OK:
                           ({"ip": "campus"}, "ip: is a range like"),
                           ({"grade_item": "Quiz 13"}, "grade_item: is none, or left out"),
                           ({"grade_item": "none"}, "points: is what its grade item is out of"),
-                          ({"course": "nope"}, "nope")]:
+                          ({"course": "nope"}, "nope"),
+                          ({"lockdown": "maybe"}, "lockdown: is true or false, not 'maybe'"),
+                          ({"visible": "soon"}, "visible: is true or false, not 'soon'"),
+                          ({"lockdown_domains": "https://x.org/a"}, "lockdown_domains: are host names like"),
+                          ({"lockdown": "false", "lockdown_domains": "x.org"},
+                           "lockdown_domains: are the sites LockDown Browser lets a student open")]:
             run("setup-quiz", quiz_yml("bad.yml", **({"name": "Quiz 16"} | keys)), ok=False, has=[why],
                 lacks=["Traceback"])
+        # LockDown and visibility: keys of the block, flags of the same names. Here,
+        # against a host that is not https, bs-drive takes nothing and the steps are
+        # printed: the sites as one line with commas, the way the Respondus box
+        # takes them, and no "make it visible" for a quiz that is to stay hidden.
+        q21 = pathlib.Path(quiz_yml("q21.yml", name="Quiz 21", lockdown="true", visible="false"))
+        q21.write_text(q21.read_text().replace("  lockdown: true\n", "  lockdown: true\n  lockdown_domains:\n"
+                                               "  - cu-cs-courses.site\n  - docs.oracle.com\n"))
+        run("setup-quiz", str(q21),
+            has=["LockDown Browser required, 2 sites allowed; left hidden",
+                 "bs-drive does not take the steps by hand here: the host is not https",
+                 "Require LockDown Browser; Advanced Settings -> allow access to external domains, one line "
+                 "with commas:\n    cu-cs-courses.site, docs.oracle.com"],
+            lacks=["Make it visible to students", "Traceback"])
+        run("setup-quiz", quiz_yml("q22.yml", name="Quiz 22"), "--lockdown-domains", "a.org, b.edu",
+            has=["LockDown Browser required, 2 sites allowed", "a.org, b.edu", "Make it visible to students"])
+        run("setup-quiz", quiz_yml("q22.yml", name="Quiz 22"), "--no-lockdown",
+            has=["LockDown Browser not required", "Don't require LockDown Browser"])
         broken = pathlib.Path(quiz_yml("bad.yml", name="Quiz 16", description=False))
         broken.write_text(broken.read_text().replace("\n\nquestions:", "\n  description: |\n    ```\n    open\n\nquestions:"))
         run("setup-quiz", str(broken), ok=False, has=["description: a block opened with ``` is never closed"],

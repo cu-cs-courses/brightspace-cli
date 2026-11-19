@@ -777,6 +777,9 @@ def command(argv, profile, cwd=None):
                      ("BRIGHTSPACE_QUIZ_DEFAULTS", "defaults")):
         if profile[key]:
             env[var] = str(profile[key])
+    # The steps bs-drive takes in a browser run for minutes, longer than a request
+    # should wait, so the page leaves them printed for the person who asked.
+    env["BRIGHTSPACE_BY_HAND"] = "1"
     r = subprocess.run([sys.executable, str(HERE / "brightspace.py"), *argv],
                        capture_output=True, text=True, timeout=1800, env=env, cwd=cwd)
     return "brightspace.py " + " ".join(map(shell_word, argv)), r.returncode, (r.stdout + r.stderr).strip()
