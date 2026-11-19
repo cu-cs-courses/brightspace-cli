@@ -681,7 +681,10 @@ import on Commonwealth's instance.
 
 *Surveys*, *special access*, *submission views* and *shuffle per section* are
 not part of the quiz object at all; what students see after an attempt is set
-in the UI. *Link attachments* on a folder are read-only: the documentation lists
+in the UI. **Special access, the header and footer, LockDown Browser and the
+visibility switch are a command even so**: [`extras/bs-drive/`](extras/bs-drive/README.md)
+fills the editor's own forms in a headless browser with this tool's session,
+and reads each setting back. *Link attachments* on a folder are read-only: the documentation lists
 them in the folder it returns and nowhere in the data it accepts, and one sent
 anyway is dropped.
 
@@ -796,6 +799,11 @@ with each question's text in Markdown, and turns it into the question-import
 CSV that puts it in a Question Library; and a CSV made another way back into
 YAML. `setup-quiz` then makes the quiz the questions go into, from the
 `brightspace:` block in the same file.
+
+[`extras/bs-drive/`](extras/bs-drive/README.md) sets what the API has no route
+for, the header and footer, special access, LockDown Browser and the visibility
+switch, by driving the quiz's editor page in a headless Chromium with this
+tool's session, one verb per setting, each read back from a fresh load.
 
 ## Tests
 
