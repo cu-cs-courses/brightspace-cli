@@ -14,6 +14,7 @@ fresh load of the page and says `checked on the server:`.
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
     bs-drive.py import   COURSE FILE.csv --section NAME [--go]
     bs-drive.py blanks   COURSE FILE.yml --section NAME [--go]
+    bs-drive.py add      COURSE QUIZ FILE.csv --section NAME [--go]
     bs-drive.py shot     COURSE QUIZ FILE.png
 
 `COURSE` is a label from `~/.config/brightspace/courses.ini` or an org unit id;
@@ -36,6 +37,9 @@ this machine's did after a reboot on 2026-11-18, kills it at load.
 
 The session is `~/.local/state/brightspace/cookies.txt`, the jar `brightspace.py
 session` fills; `BRIGHTSPACE_STATE` moves it, as it does for `brightspace.py`.
+`$BRIGHTSPACE_SESSION` acts as a `[name]` in the keep-alive file instead, read
+by `brightspace.py`'s own parser, and `$BRIGHTSPACE_COURSES` names another
+courses file, whose `ou =` lines it reads, as `brightspace.py` does.
 A dead session shows as an editor page that does not open.
 
 **Try a verb in a sandbox first**, the way every write to Brightspace is tried:
@@ -95,13 +99,31 @@ either; that blank is added by hand. The points are shared among the blanks,
 *part marks per blank*, which is Brightspace's default for a short answer with
 several.
 
-The two together are the questions of a quiz, from its YAML, with no hand step:
+**`add`** is the quiz's *Add Existing*: it opens *Browse Question Library*,
+opens the section, ticks the question of each title the CSV has, checks that
+exactly those are ticked and no section is, and imports them. It reads the
+quiz's questions through the API before and after, so a title the quiz holds
+already is refused rather than added twice, and the readback is the quiz's own
+list, each title exactly once. The quiz gets the questions themselves, not the
+section as a titled part of it.
 
+With `setup-quiz` for the quiz itself, a quiz goes in from its YAML with no hand
+step:
+
+    brightspace.py setup-quiz q9.yml --go
     bs-yaml-quiz.py q9.yml --msa-as-sa
     bs-drive.py import 120 q9.csv --section 'Quiz 9' --go
     bs-drive.py blanks 120 q9.yml --section 'Quiz 9' --go
+    bs-drive.py add    120 'Quiz 9' q9.csv --section 'Quiz 9' --go
 
-and then the quiz's *Add Existing*, which is still by hand.
+Proved on 2026-11-19 in the 120 Devshell with 115's Quiz 12 in-class YAML,
+seven questions of which two have two blanks: the quiz-questions API read back
+seven questions at their points and both blanks of each, `6` and `4`, `0` and
+`0`. **In a course taught from a shell, as 115 is, a test does not go in the
+shell**: `copy-quiz` copies every quiz the shell holds and refuses to run while
+it holds more than one, and `delete-quiz` will not remove a quiz that has
+questions, so a test quiz left there blocks the next copy until it is deleted
+by hand.
 
 **`shot`** saves a screenshot of the editor, for a look at what a verb saw.
 
@@ -159,6 +181,17 @@ the same things.
   200. Its answers are tags: typed into the blank's field, each ended with
   Enter. Every blank is added before any is typed into, since a click on *Add
   Blank* after typing landed where the button had been.
+- **Add Existing's dialog draws its rows in closed shadow roots too.** A text
+  search finds a row's words but not the row, and a title like *Assignment* is
+  found elsewhere on the page as well; so a box is found as a box, and its row
+  read from the box upward: a question's reads `<title> <type> <n> points`, a
+  section's `<name> Section`. Ticking every question of a section ticks the
+  dialog's *select all* box by itself, which is the dialog's own bookkeeping
+  and not a section ticked. A section opens with the button labeled *Expand
+  <name> section*.
+- **The quiz-questions API reads a short answer's blanks**: `QuestionInfo`'s
+  `Blanks`, each with its `Answers` and an `EvaluationType`. It covers only
+  questions already in a quiz; the library has no read route.
 - **Deleting in the library** is the row's *Select* box, the list's *Delete*,
   and the *Delete* inside the confirmation, which says only *delete the
   selected items?*. No verb deletes; the Devshell's probes were cleared this way

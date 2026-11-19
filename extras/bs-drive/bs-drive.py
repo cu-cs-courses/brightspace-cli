@@ -11,6 +11,7 @@ a fresh load; without --go nothing is written.
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
     bs-drive.py import   COURSE FILE.csv --section NAME [--go]
     bs-drive.py blanks   COURSE FILE.yml --section NAME [--go]
+    bs-drive.py add      COURSE QUIZ FILE.csv --section NAME [--go]
     bs-drive.py shot     COURSE QUIZ FILE.png
 
 COURSE is a label from ~/.config/brightspace/courses.ini or an org unit id;
@@ -232,19 +233,50 @@ def load_cookies(path=STATE / "cookies.txt"):
     return pairs
 
 
+def brightspace_module():
+    spec = importlib.util.spec_from_file_location("brightspace", BRIGHTSPACE_PY)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def session_cookies():
+    """The cookies of the session to act as: with $BRIGHTSPACE_SESSION, that
+    [name]'s entry in the keep-alive file, read by brightspace.py's own parser,
+    as brightspace.py acts for it; without, the jar `brightspace.py session`
+    fills."""
+    named = os.environ.get("BRIGHTSPACE_SESSION")
+    if not named:
+        return load_cookies()
+    bp = brightspace_module()
+    try:
+        entries = bp.keepalive_entries(bp.KEEPALIVE_FILE)
+    except bp.Failed as e:
+        sys.exit(str(e))
+    for name, state, cookies in entries:
+        if name == named:
+            if cookies:
+                return [(c, cookies[c]) for c in bp.SESSION_COOKIES]
+            return load_cookies(pathlib.Path(state).expanduser() / "cookies.txt")
+    sys.exit(f"no session [{named}] in {bp.KEEPALIVE_FILE}")
+
+
 def org_unit(course):
     """An org unit id as given, or read off the course's site for a label, the
     way brightspace.py reads it: courses.ini names the site, whose _quarto.yml
     has urls.brightspace with ou= in it."""
+    path = pathlib.Path(os.environ.get("BRIGHTSPACE_COURSES") or CONFIG / "courses.ini").expanduser()
     ini = configparser.ConfigParser()
-    ini.read(CONFIG / "courses.ini")
+    ini.read(path)
     if course not in ini:                      # a label is often digits too, "120": the file is asked first
         if re.fullmatch(r"\d+", str(course)):
             return int(course)
-        sys.exit(f"{course!r} is not an org unit id or a label in {CONFIG / 'courses.ini'}")
-    site = pathlib.Path(ini[course]["site"])
+        sys.exit(f"{course!r} is not an org unit id or a label in {path}")
+    if ini[course].get("ou"):
+        return int(ini[course]["ou"])
+    site = pathlib.Path(ini[course]["site"]).expanduser()
     if not site.is_absolute():
-        site = (CONFIG / "courses.ini").resolve().parent / site
+        site = path.resolve().parent / site
     text = (site / "_quarto.yml").read_text()
     m = re.search(r"brightspace:\s*[\"']?https?://[^\s\"']*?/(\d+)[\"']?\s*$", text, flags=re.M)
     if not m:
@@ -272,7 +304,7 @@ def quiz(ou, which):
 
 def session(ou, qi, width=1400, height=1200, respondus=False):
     b = Browser(width, height)
-    b.cookies(load_cookies())
+    b.cookies(session_cookies())
     if respondus:
         b.goto(RESPONDUS.format(host=HOST, ou=ou), settle=10)
         frames = b.frame_urls("respondus")
@@ -566,7 +598,7 @@ def library(ou, section, create=False, go=False):
     create and go say so. Returns (browser, page), or (None, None) when the
     section is missing and nothing may be written."""
     b = Browser(1400, 1600)
-    b.cookies(load_cookies())
+    b.cookies(session_cookies())
     b.goto(LIBRARY.format(host=HOST, ou=ou), settle=8)
     p = Page(b)
     if "Question Library" not in (b.eval("document.title") or ""):
@@ -783,6 +815,116 @@ def verb_blanks(a):
         sys.exit(1)
 
 
+# Add Existing's dialog draws its rows in closed shadow roots, so a box is found
+# through the DOM domain and its row read from the box itself: the row of a
+# question reads "<title> <type> <n> points", a section's "<name> Section".
+BOX_ROW = """function () {
+  let r = this;
+  for (let i = 0; i < 8 && r; i++) {
+    r = r.parentElement || (r.getRootNode && r.getRootNode().host) || null;
+    if (r && (r.innerText || '').trim().split('\\n').length > 1) break;
+  }
+  return {id: this.id, checked: this.checked, row: r ? (r.innerText || '').replace(/\\s+/g, ' ').trim() : ''};
+}"""
+TYPES = ("Short Answer|Multi-Short Answer|Multiple Choice|Multi-Select|True or False|Written Response|"
+         "Matching|Ordering|Fill in the Blanks|Likert|Arithmetic|Significant Figures")
+
+
+def dialog_boxes(b):
+    out = []
+    for n in dom_find(b, 'input[type="checkbox"]'):
+        try:
+            obj = b.send("DOM.resolveNode", nodeId=n)["object"]["objectId"]
+            out.append(b.send("Runtime.callFunctionOn", objectId=obj, returnByValue=True,
+                              functionDeclaration=BOX_ROW)["result"]["value"])
+        except RuntimeError:
+            pass
+    return out
+
+
+def click_node(b, query):
+    """Scroll the first node matching query into view, then click it where it is."""
+    nid = dom_wait(b, query, 10, shown=False)
+    if not nid:
+        return False
+    obj = b.send("DOM.resolveNode", nodeId=nid)["object"]["objectId"]
+    b.send("Runtime.callFunctionOn", objectId=obj, functionDeclaration="function () { this.scrollIntoView({block: 'center'}); }")
+    time.sleep(0.4)
+    c = dom_center(b, dom_wait(b, query, 5, shown=False))
+    if not c:
+        return False
+    b.click_xy(*c); time.sleep(0.5)
+    return True
+
+
+def quiz_questions(ou, qi):
+    """The names of a quiz's questions, read through the API, as the session acts."""
+    bp = brightspace_module()
+    s = bp.open_session(argparse.Namespace(base_url=None, course=None))
+    le, _ = s.versions()
+    r = s.api(f"/d2l/api/le/{le}/{ou}/quizzes/{qi}/questions/")
+    return [q.get("Name", "") for q in (r.get("Objects", []) if isinstance(r, dict) else r)]
+
+
+def verb_add(a):
+    ou = org_unit(a.course); qi, name = quiz(ou, a.quiz)
+    titles = csv_titles(a.file)
+    if not titles:
+        sys.exit(f"{a.file} has no Title rows")
+    have = quiz_questions(ou, qi)
+    there = [t for t in titles if t in have]
+    print(f"{name}: {len(have)} questions now")
+    if len(there) == len(titles):
+        print("all of the file's questions are in it already; nothing to add"); return
+    if there:
+        sys.exit("some are in it already, and Add Existing would add them a second time: " + "; ".join(there))
+    print(f"would add {len(titles)} from section {a.section!r}: {'; '.join(titles)}")
+    if not a.go:
+        print("nothing written; add --go"); return
+    b, p = session(ou, qi)
+    try:
+        p.click("d2l-button", "Add Existing", settle=3)
+        p.click("d2l-menu-item", "Browse Question Library", settle=10)
+        if not dom_wait(b, 'input[type="checkbox"][id^="sectionId_"]', 60):
+            sys.exit("the library did not open in the dialog")
+        sec = [x for x in dialog_boxes(b) if x["id"].startswith("sectionId_") and x["row"] == f"{a.section} Section"]
+        if len(sec) != 1:
+            sys.exit(f"{len(sec)} sections named {a.section!r} in the dialog; nothing added")
+        if not click_node(b, f'button[aria-label="Expand {a.section} section"]'):
+            sys.exit(f"no way to open section {a.section!r} in the dialog")
+        time.sleep(5)
+        rows = [x for x in dialog_boxes(b) if x["id"].startswith("questionId_")]
+        want = {}
+        for t in titles:
+            hit = [x["id"] for x in rows if re.fullmatch(re.escape(t) + rf" ({TYPES}) [\d.]+ points?", x["row"])]
+            if len(hit) != 1:
+                sys.exit(f"{len(hit)} questions titled {t!r} in section {a.section!r}; nothing added")
+            want[t] = hit[0]
+        for t, box in want.items():
+            if not click_node(b, f"#{box}"):
+                sys.exit(f"the box of {t!r} could not be clicked; nothing added")
+        on = sorted(x["id"] for x in dialog_boxes(b) if x["checked"] and x["id"].startswith(("questionId_", "sectionId_")))
+        if on != sorted(want.values()):
+            sys.exit(f"ticked {on}, not the {len(want)} questions alone; nothing added")
+        imp = [n for n in dom_find(b, "button") if dom_text(b, n) == "Import" and dom_center(b, n)]
+        if not imp:
+            sys.exit("no Import button in the dialog; nothing added")
+        b.click_xy(*dom_center(b, imp[0]))
+        for _ in range(60):
+            time.sleep(1)
+            if not dom_find(b, 'input[type="checkbox"][id^="questionId_"]'):
+                break
+        time.sleep(3)
+    finally:
+        b.close()
+    got = quiz_questions(ou, qi)
+    missing = [t for t in titles if got.count(t) != 1]
+    print(f"checked on the server: {name} holds {len(got)} questions; "
+          + (f"NOT EXACTLY ONCE: {'; '.join(missing)}" if missing else f"each of the {len(titles)} once"))
+    if missing:
+        sys.exit(1)
+
+
 def verb_shot(a):
     ou = org_unit(a.course); qi, name = quiz(ou, a.quiz)
     b, p = session(ou, qi)
@@ -819,6 +961,10 @@ def main():
     s.add_argument("course"); s.add_argument("file", help="the quiz's YAML, whose CSV was imported with --msa-as-sa")
     s.add_argument("--section", required=True, help="the section the questions were imported into")
     s.add_argument("--go", action="store_true"); s.set_defaults(fn=verb_blanks)
+    s = sub.add_parser("add", help="Add Existing: a section's questions, by the CSV's titles, into a quiz"); common(s)
+    s.add_argument("file", help="the CSV whose titles say which questions")
+    s.add_argument("--section", required=True, help="the library section they were imported into")
+    s.set_defaults(fn=verb_add)
     s = sub.add_parser("shot", help="a screenshot of the editor, for a look"); common(s)
     s.add_argument("file"); s.set_defaults(fn=verb_shot)
     a = ap.parse_args()
