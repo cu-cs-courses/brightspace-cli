@@ -12,6 +12,8 @@ fresh load of the page and says `checked on the server:`.
     bs-drive.py visible  COURSE QUIZ [--hidden] [--go]
     bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--go]
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
+    bs-drive.py import   COURSE FILE.csv --section NAME [--go]
+    bs-drive.py blanks   COURSE FILE.yml --section NAME [--go]
     bs-drive.py shot     COURSE QUIZ FILE.png
 
 `COURSE` is a label from `~/.config/brightspace/courses.ini` or an org unit id;
@@ -22,10 +24,15 @@ page, prints what is there and writes nothing.** With it, the verb writes,
 closes the browser, opens the page again and reads the setting back; a readback
 that differs from what was asked exits 1.
 
-It needs `chromium` on `PATH` and `websocket-client`:
+It needs `chromium` on `PATH` and `websocket-client`, and `blanks` needs
+`pyyaml` too, since it reads the quiz through `bs-yaml-quiz`:
 
-    nix-shell -p chromium python3Packages.websocket-client --run \
+    nix-shell -p chromium python3Packages.websocket-client python3Packages.pyyaml --run \
       './bs-drive.py visible 120 "Progress Exam 3"'
+
+Chromium is started without the session's `LD_LIBRARY_PATH`: a Nix-built
+Chromium finds its own libraries, and a desktop that exports a newer one, as
+this machine's did after a reboot on 2026-11-18, kills it at load.
 
 The session is `~/.local/state/brightspace/cookies.txt`, the jar `brightspace.py
 session` fills; `BRIGHTSPACE_STATE` moves it, as it does for `brightspace.py`.
@@ -66,6 +73,36 @@ nothing is written. The user is the name as the classlist shows it. **Do not
 put a student's name in the quiz's title**, see the README above on names;
 the name goes to this verb's argument and nowhere on Brightspace.
 
+**`import`** puts a question-import CSV, the one `bs-yaml-quiz.py` writes, into
+a section of the course's Question Library, which is the step before a quiz's
+*Add Existing*. The section is at the library's top and is made when it is not
+there. **It refuses a CSV any of whose titles the section already holds**, since
+an import of the same file again adds a second copy of every question; delete
+those in the library first. It uploads the file, checks that Brightspace found
+as many questions as the CSV has titles, presses *Import All*, and reads the
+section back from a fresh load, every title by name.
+
+**`blanks`** finishes a quiz's multi-blank questions. The CSV cannot say which
+blank an answer is for, so `bs-yaml-quiz.py --msa-as-sa` imports an `MSA`
+question as a short answer with its first blank only, and prints the rest.
+This verb reads the same YAML, finds each `MSA` question in the section by its
+title, adds the blanks after the first, types every answer into each, saves,
+and reads all the blanks back. A question that already has all its blanks is
+left alone; one that has something else than the first blank as imported is
+left alone too, and named. A weighted answer, `- 50: half right`, or a
+`regexp:` one stops it, since the blank's answer field has no place for
+either; that blank is added by hand. The points are shared among the blanks,
+*part marks per blank*, which is Brightspace's default for a short answer with
+several.
+
+The two together are the questions of a quiz, from its YAML, with no hand step:
+
+    bs-yaml-quiz.py q9.yml --msa-as-sa
+    bs-drive.py import 120 q9.csv --section 'Quiz 9' --go
+    bs-drive.py blanks 120 q9.yml --section 'Quiz 9' --go
+
+and then the quiz's *Add Existing*, which is still by hand.
+
 **`shot`** saves a screenshot of the editor, for a look at what a verb saw.
 
 ## What the pages are made of, for the next verb
@@ -102,5 +139,29 @@ the same things.
 - **The API's readback of a header substitutes `{OrgDefinedId}` with the
   caller's own id**, so the editor, reloaded, is the only readback that shows
   what students get.
+- **The library's upload dialog keeps its file input in a closed shadow root**,
+  which no script in the page reaches. The DevTools DOM domain does:
+  `DOM.getDocument` with `pierce`, then `DOM.performSearch` for
+  `input[type="file"]`, then `DOM.setFileInputFiles` on the node. A node id
+  lasts until the next `getDocument`, so it is used at once and found again
+  after any other search; the first `import` crashed on a stale one.
+- **An upload stages its questions in a section of its own**,
+  `TemporaryQuestionsImportSection_` and a GUID, inside the section that was
+  open, and only *Import All* or the dialog's *Cancel* takes them out of it. An
+  upload left at the dialog leaves that section behind with the questions in
+  it; `import` cancels on every failure after the upload for this reason.
+- **An import lands in the section that is open.** The list's link enters a
+  section, the tree's does not; the list frame's address then carries the
+  section's id as `poid`.
+- **The question editor's Save takes Enter, not a click.** A mouse click on it
+  sent nothing at all, with the button shown as pressed, on 2026-11-18; the
+  same button focused and Enter pressed submitted the form, a `PUT` answered
+  200. Its answers are tags: typed into the blank's field, each ended with
+  Enter. Every blank is added before any is typed into, since a click on *Add
+  Blank* after typing landed where the button had been.
+- **Deleting in the library** is the row's *Select* box, the list's *Delete*,
+  and the *Delete* inside the confirmation, which says only *delete the
+  selected items?*. No verb deletes; the Devshell's probes were cleared this way
+  by hand-written script.
 - **A throwaway profile per run, removed with the browser.** Fifteen of them
   left behind filled `/tmp` and then the root filesystem on 2026-11-18.

@@ -9,6 +9,8 @@ a fresh load; without --go nothing is written.
     bs-drive.py visible  COURSE QUIZ [--hidden] [--go]
     bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--go]
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
+    bs-drive.py import   COURSE FILE.csv --section NAME [--go]
+    bs-drive.py blanks   COURSE FILE.yml --section NAME [--go]
     bs-drive.py shot     COURSE QUIZ FILE.png
 
 COURSE is a label from ~/.config/brightspace/courses.ini or an org unit id;
@@ -17,7 +19,7 @@ websocket-client (nix-shell -p chromium python3Packages.websocket-client).
 The README beside this file says what each page looks like underneath and
 what was learned driving it.
 """
-import argparse, base64, configparser, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time, urllib.request
+import argparse, base64, configparser, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time, urllib.request
 
 try:
     import websocket
@@ -44,14 +46,18 @@ class Browser:
             ["chromium", "--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
              f"--window-size={width},{height}", f"--user-data-dir={self.profile}",
              "--remote-debugging-port=0", "--remote-allow-origins=*", "about:blank"],
-            stdout=subprocess.DEVNULL, stderr=open(pathlib.Path(self.profile) / "chromium.err", "w"))
+            stdout=subprocess.DEVNULL, stderr=open(pathlib.Path(self.profile) / "chromium.err", "w"),
+            # A Nix-built Chromium finds its libraries by its own paths; a desktop session's
+            # LD_LIBRARY_PATH (a newer alsa-lib, on 2026-11-18) overrides them and it dies at load.
+            env={k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"})
         port_file = pathlib.Path(self.profile) / "DevToolsActivePort"
         for _ in range(150):
             if port_file.exists() and port_file.read_text().strip():
                 break
             time.sleep(0.2)
         else:
-            self.close(); sys.exit("chromium did not start (is it on PATH?)")
+            err = (pathlib.Path(self.profile) / "chromium.err").read_text(errors="replace").strip().splitlines()
+            self.close(); sys.exit("chromium did not start: " + (err[-1] if err else "is it on PATH?"))
         port = port_file.read_text().split()[0]
         targets = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json"))
         page = next(t for t in targets if t["type"] == "page")
@@ -101,6 +107,16 @@ class Browser:
 
     def insert(self, text):
         self.send("Input.insertText", text=text)
+
+    def key(self, key, code=None, keycode=None):
+        """One key pressed and released, Enter by default the way a chip input wants it."""
+        p = {"key": key, "code": code or key, "windowsVirtualKeyCode": keycode or {"Enter": 13, "Tab": 9}.get(key, 0)}
+        if key == "Enter":
+            p["text"] = "\r"
+        self.send("Input.dispatchKeyEvent", type="keyDown", **p)
+        p.pop("text", None)
+        self.send("Input.dispatchKeyEvent", type="keyUp", **p)
+        time.sleep(0.3)
 
     def frame_urls(self, needle):
         return [t["url"] for t in self.send("Target.getTargets")["targetInfos"] if t["type"] == "iframe" and needle in t["url"]]
@@ -159,12 +175,19 @@ class Page:
         self.b = b
 
     def helpers(self):
+        """Install the helpers, again after every navigation: a new document
+        has none of them, and a click that loads a page is a navigation."""
         self.b.eval(HELPERS)
+
+    def js(self, code):
+        if self.b.eval("typeof findAll") != "function":
+            self.helpers()
+        return self.b.eval(code)
 
     def find(self, sel, text, exact=True, last=True):
         test = f"t === {json.dumps(text)}" if exact else f"t.includes({json.dumps(text)})"
         pick = "es[es.length - 1]" if last else "es[0]"
-        return self.b.eval(f"""(() => {{
+        return self.js(f"""(() => {{
           const es = findAll(e => e.matches && e.matches({json.dumps(sel)}) && visible(e) && (() => {{ const t = textOf(e); return {test}; }})());
           if (!es.length) return null; const e = {pick};
           let target = e; if (e.tagName === 'INPUT' && e.getBoundingClientRect().width < 4 && e.labels && e.labels[0]) target = e.labels[0];
@@ -181,7 +204,7 @@ class Page:
         return r
 
     def click_pred(self, pred_js, settle=3, must=True, what=""):
-        r = self.b.eval(f"""(() => {{ const es = findAll({pred_js}).filter(e => visible(e)); if (!es.length) return null;
+        r = self.js(f"""(() => {{ const es = findAll({pred_js}).filter(e => visible(e)); if (!es.length) return null;
                             const e = es[0]; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()""")
         if not r:
             if must:
@@ -477,6 +500,289 @@ def verb_special_access(a):
         sys.exit(1)
 
 
+# ------------------------------------------------------------ the Question Library
+
+LIBRARY = "https://{host}/d2l/lms/qc/main_frame.d2l?ctid=1&ti=51000&ou={ou}"
+
+
+# The library's upload dialog keeps its file input in a closed shadow root, which no
+# script in the page can reach; the DevTools DOM domain can, with pierce. A node id
+# lasts until the next getDocument, so each search is used at once.
+def dom_find(b, query):
+    b.send("DOM.getDocument", depth=-1, pierce=True)
+    r = b.send("DOM.performSearch", query=query, includeUserAgentShadowDOM=True)
+    ids = (b.send("DOM.getSearchResults", searchId=r["searchId"], fromIndex=0, toIndex=r["resultCount"])["nodeIds"]
+           if r["resultCount"] else [])
+    b.send("DOM.discardSearchResults", searchId=r["searchId"])
+    return ids
+
+
+def dom_text(b, nid):
+    try:
+        obj = b.send("DOM.resolveNode", nodeId=nid)["object"]["objectId"]
+        r = b.send("Runtime.callFunctionOn", objectId=obj, returnByValue=True, functionDeclaration=
+                   "function () { const e = this.nodeType === 3 ? this.parentNode : this;"
+                   " return ((e && (e.innerText || e.textContent)) || '').trim(); }")
+        return r["result"].get("value") or ""
+    except RuntimeError:
+        return ""
+
+
+def dom_center(b, nid):
+    try:
+        q = b.send("DOM.getBoxModel", nodeId=nid)["model"]["content"]
+    except RuntimeError:
+        return None
+    return ((q[0] + q[4]) / 2, (q[1] + q[5]) / 2) if q[4] - q[0] > 0 else None
+
+
+def dom_wait(b, query, secs=60, shown=True):
+    """The first node matching query, shown on the screen unless shown is False,
+    looked for once a second until secs have passed."""
+    end = time.time() + secs
+    while time.time() < end:
+        for nid in dom_find(b, query):
+            if not shown or dom_center(b, nid):
+                return nid
+        time.sleep(1)
+    return None
+
+
+# The list frame's rows: each one's name and type, a section's type being "-".
+ROWS = r"""(() => { const out = [];
+  for (const d of allDocs().filter(d => /main_frame_list/.test((d.location || {}).href || ''))) {
+    let ni = -1, ti = -1;
+    for (const tr of deepAll('tr', d)) {
+      const cells = [...tr.cells].map(c => (c.innerText || '').replace(/\s+/g, ' ').trim());
+      if (ni < 0) { ni = cells.indexOf('Name'); ti = cells.indexOf('Type'); continue; }
+      const a = [...tr.querySelectorAll('a')].find(a => (a.textContent || '').trim());
+      if (a && ti >= 0 && cells.length > ti) out.push({name: a.textContent.trim(), type: cells[ti]});
+    } }
+  return out; })()"""
+
+
+def library(ou, section, create=False, go=False):
+    """A browser on the Question Library with the section open, made first when
+    create and go say so. Returns (browser, page), or (None, None) when the
+    section is missing and nothing may be written."""
+    b = Browser(1400, 1600)
+    b.cookies(load_cookies())
+    b.goto(LIBRARY.format(host=HOST, ou=ou), settle=8)
+    p = Page(b)
+    if "Question Library" not in (b.eval("document.title") or ""):
+        b.close(); sys.exit("the Question Library did not open: is the session alive?")
+    names = [r["name"] for r in p.js(ROWS) if r["type"] == "-" and not r["name"].startswith(STAGING)]
+    if section not in names:
+        if not create:
+            b.close(); sys.exit(f"no section {section!r} in the library; it has: {', '.join(names) or 'none'}")
+        if not go:
+            print(f"no section {section!r} yet; --go makes it")
+            b.close(); return None, None
+        p.click("button, d2l-button, d2l-dropdown-button", "New", settle=3)
+        p.click("d2l-menu-item", "Section", settle=8)
+        r = p.js("""(() => { const e = findAll(e => e.tagName === 'INPUT' && e.name === 'section.name')[0]; if (!e) return null;
+                    e.scrollIntoView({block: 'center'}); e.focus(); return absOf(e); })()""")
+        if not r:
+            b.close(); sys.exit("the new section's form did not open")
+        b.click_xy(r["x"], r["y"]); b.insert(section); time.sleep(1)
+        p.click("button, d2l-button", "Save", settle=8)
+        names = [r["name"] for r in p.js(ROWS) if r["type"] == "-"]
+        if section not in names:
+            b.close(); sys.exit(f"section {section!r} was not made; the library has: {', '.join(names)}")
+        print(f"made section {section!r}")
+    p.click("a", section, settle=8)            # the list's link, not the tree's: the last one on the page
+    if not p.js(f"findAll(e => /^H[12]$/.test(e.tagName) && textOf(e) === {json.dumps(section)}).length"):
+        b.close(); sys.exit(f"section {section!r} did not open")
+    return b, p
+
+
+STAGING = "TemporaryQuestionsImportSection_"
+
+
+def cancel(b):
+    """The upload dialog's Cancel, which an upload that is not imported needs: the
+    upload has already put its questions in a section of its own, named STAGING
+    and a GUID, and only Import All or Cancel takes them out of it."""
+    for nid in dom_find(b, "d2l-button"):
+        if dom_text(b, nid) == "Cancel" and dom_center(b, nid):
+            b.click_xy(*dom_center(b, nid)); time.sleep(5); return
+
+
+def csv_titles(path):
+    import csv
+    with open(path, newline="", encoding="utf-8") as f:
+        return [row[1] for row in csv.reader(f) if len(row) > 1 and row[0] == "Title"]
+
+
+def verb_import(a):
+    ou = org_unit(a.course)
+    path = pathlib.Path(a.file).resolve()
+    titles = csv_titles(path)
+    if not titles:
+        sys.exit(f"{a.file} has no Title rows: is it a question-import CSV?")
+    if len(set(titles)) != len(titles):
+        sys.exit(f"{a.file} has two questions of one title; the readback goes by title")
+    b, p = library(ou, a.section, create=True, go=a.go)
+    if b is None:
+        print(f"would import {len(titles)} questions: {'; '.join(titles)}"); return
+    try:
+        rows = p.js(ROWS)
+        have = [r["name"] for r in rows if r["type"] != "-"]
+        staged = [r["name"] for r in rows if r["name"].startswith(STAGING)]
+        print(f"{a.section}: {len(have)} questions now")
+        if staged:
+            print(f"  and {len(staged)} section(s) an upload left behind without importing: {', '.join(staged)}")
+        dup = [t for t in titles if t in have]
+        if dup:
+            sys.exit("already in the section, and an import would make a second copy: " + "; ".join(dup)
+                     + ". Delete those in the library first.")
+        print(f"would import {len(titles)} questions: {'; '.join(titles)}")
+        if not a.go:
+            print("nothing written; add --go"); return
+        p.click("button, d2l-button, d2l-button-subtle, d2l-dropdown-button, d2l-dropdown-button-subtle", "Import")
+        p.click("d2l-menu-item", "Upload a File", settle=2)
+        nid = dom_wait(b, 'input[type="file"]', 60, shown=False)
+        if not nid:
+            sys.exit("the upload dialog did not open")
+        b.send("DOM.setFileInputFiles", files=[str(path)], nodeId=nid)
+        btn = dom_wait(b, "#review-import-all-button", 90)
+        said = [dom_text(b, n) for n in dom_find(b, "Found")]
+        found = next((int(m.group(1)) for t in said for m in [re.search(r"Found\s+(\d+)\s+question", t)] if m), None)
+        if not btn:
+            errs = [t for t in (dom_text(b, n) for n in dom_find(b, "rror")) if t][:3]
+            cancel(b)
+            sys.exit("the upload did not come back with Import All" + (": " + " / ".join(errs) if errs else ""))
+        if found != len(titles):
+            cancel(b)
+            sys.exit(f"Brightspace found {found} questions in the file, which has {len(titles)}; nothing imported")
+        btn = dom_wait(b, "#review-import-all-button", 10)     # the count's search made the old node id stale
+        b.click_xy(*dom_center(b, btn))
+        for _ in range(60):
+            time.sleep(1)
+            if not dom_find(b, "#review-import-all-button"):
+                break
+        time.sleep(3)
+    finally:
+        b.close()
+    b, p = library(ou, a.section)
+    try:
+        rows = p.js(ROWS)
+        got = {r["name"]: r["type"] for r in rows if r["type"] != "-"}
+        staged = [r["name"] for r in rows if r["name"].startswith(STAGING)]
+    finally:
+        b.close()
+    missing = [t for t in titles if t not in got]
+    print(f"checked on the server: {a.section} holds {len(got)} questions; "
+          + (f"MISSING {'; '.join(missing)}" if missing else f"all {len(titles)} imported"))
+    if staged:
+        print(f"  and a staging section is still there: {', '.join(staged)}")
+    if missing:
+        sys.exit(1)
+
+
+# One blank's answers, read off its tag field: the input's label says how many and
+# which blank, and the tags before it are the answers.
+BLANKS = r"""findAll(e => e.tagName === 'INPUT' && /Answers for blank \d+ of \d+/.test(labelOf(e))).map(e => {
+  const m = labelOf(e).match(/(\d+) Answers for blank (\d+) of (\d+)/);
+  return {blank: +m[2], of: +m[3], answers: [...e.parentElement.children].filter(c => c !== e)
+    .map(c => (c.innerText || c.textContent || '').trim()).filter(Boolean)}; })"""
+
+
+def yaml_quiz():
+    spec = importlib.util.spec_from_file_location("bs_yaml_quiz", HERE.parent / "bs-yaml-quiz" / "bs-yaml-quiz.py")
+    m = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(m)
+    except ImportError as e:
+        sys.exit(f"blanks reads the quiz with bs-yaml-quiz, which needs {e.name}: nix-shell -p python3Packages.pyyaml")
+    return m
+
+
+def wanted_blanks(path):
+    """[(title, [[answer, ...] per blank])] for every MSA question in a quiz file,
+    the answers as the CSV would write them."""
+    yq = yaml_quiz()
+    try:
+        data = yq.load(pathlib.Path(path).read_text())
+        out = []
+        for n, q in enumerate(data["questions"], 1):
+            if not (isinstance(q, dict) and q.get("type") == "MSA"):
+                continue
+            where = f"{path}, question {n}"
+            blanks = []
+            for i, (_, answers) in enumerate(yq.msa_blanks(q, where), 1):
+                rows = yq.answer_rows(answers, f"{where}, blank {i}")
+                odd = [r[2] for r in rows if r[1] != "100" or r[3]]
+                if odd:
+                    sys.exit(f"{where}, blank {i}: {odd} has a weight or regexp, which the blank's answer field "
+                             "has no place for; add that blank by hand")
+                blanks.append([r[2] for r in rows])
+            out.append((q.get("title"), blanks))
+    except yq.Failed as e:
+        sys.exit(str(e))
+    return out
+
+
+def open_question(ou, section, title):
+    b, p = library(ou, section)
+    names = [r["name"] for r in p.js(ROWS) if r["type"] != "-"]
+    if names.count(title) != 1:
+        b.close(); sys.exit(f"{section!r} holds {names.count(title)} questions titled {title!r}; import it first, once")
+    p.click("a", title, settle=10)
+    if b.eval("document.title") != "Question Editor":
+        b.close(); sys.exit(f"{title!r} did not open in the question editor")
+    return b, p
+
+
+def verb_blanks(a):
+    ou = org_unit(a.course)
+    want = wanted_blanks(a.file)
+    if not want:
+        sys.exit(f"{a.file} has no MSA question")
+    bad = False
+    for title, blanks in want:
+        b, p = open_question(ou, a.section, title)
+        try:
+            have = [x["answers"] for x in p.js(BLANKS)]
+            print(f"{title}: {len(have)} of {len(blanks)} blanks now")
+            if have == blanks:
+                print("  whole already; nothing to change"); continue
+            if len(have) != 1 or have[0] != blanks[0]:
+                print(f"  it holds {have}, not the first blank as imported, {blanks[0]}: left alone"); bad = True; continue
+            for k, answers in enumerate(blanks[1:], 2):
+                print(f"  would add blank {k}: {', '.join(answers)}")
+            if not a.go:
+                print("  nothing written; add --go"); continue
+            for k in range(2, len(blanks) + 1):      # every blank first: a click after typing lands on a moved button
+                p.click("d2l-button, button", "Add Blank", settle=3)
+            if len(p.js(BLANKS)) != len(blanks):
+                sys.exit(f"Add Blank made {len(p.js(BLANKS))} blanks, not {len(blanks)}; nothing saved")
+            for k, answers in enumerate(blanks[1:], 2):
+                r = p.js(f"""(() => {{ const e = findAll(e => e.tagName === 'INPUT' && /Answers for blank {k} of/.test(labelOf(e)))[0];
+                             e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()""")
+                b.click_xy(r["x"], r["y"])
+                for ans in answers:
+                    b.insert(ans); b.key("Enter")
+            typed = [x["answers"] for x in p.js(BLANKS)]
+            if typed != blanks:
+                sys.exit(f"  the fields read {typed} before saving, not {blanks}; nothing saved")
+            # A mouse click on Save sends nothing here; Enter on the focused button submits the form.
+            p.js("findAll(e => e.tagName === 'BUTTON' && visible(e) && textOf(e) === 'Save')[0].focus()")
+            b.key("Enter"); time.sleep(8)
+        finally:
+            b.close()
+        b, p = open_question(ou, a.section, title)
+        try:
+            got = [x["answers"] for x in p.js(BLANKS)]
+        finally:
+            b.close()
+        ok = got == blanks
+        bad |= not ok
+        print(f"  checked on the server: {len(got)} blanks, " + ("as the file has them" if ok else f"DIFFERENT: {got}"))
+    if bad:
+        sys.exit(1)
+
+
 def verb_shot(a):
     ou = org_unit(a.course); qi, name = quiz(ou, a.quiz)
     b, p = session(ou, qi)
@@ -505,6 +811,14 @@ def main():
     s = sub.add_parser("special-access", help="put one user on the quiz's special access list"); common(s)
     s.add_argument("--user", required=True, help="the name as the classlist shows it, 'First Last'")
     s.add_argument("--only", action="store_true", help="and allow only users with special access"); s.set_defaults(fn=verb_special_access)
+    s = sub.add_parser("import", help="a question-import CSV into a section of the Question Library")
+    s.add_argument("course"); s.add_argument("file", help="the CSV bs-yaml-quiz.py writes")
+    s.add_argument("--section", required=True, help="made at the library's top if it is not there")
+    s.add_argument("--go", action="store_true"); s.set_defaults(fn=verb_import)
+    s = sub.add_parser("blanks", help="the blanks after the first of each MSA question, from its quiz YAML")
+    s.add_argument("course"); s.add_argument("file", help="the quiz's YAML, whose CSV was imported with --msa-as-sa")
+    s.add_argument("--section", required=True, help="the section the questions were imported into")
+    s.add_argument("--go", action="store_true"); s.set_defaults(fn=verb_blanks)
     s = sub.add_parser("shot", help="a screenshot of the editor, for a look"); common(s)
     s.add_argument("file"); s.set_defaults(fn=verb_shot)
     a = ap.parse_args()

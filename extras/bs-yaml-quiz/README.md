@@ -186,6 +186,10 @@ question 3 (Q3 Two names after the loop): blank 1 of 2 imported
     two
 ```
 
+**`bs-drive.py blanks` adds them for you**, from the same YAML, once the CSV is
+imported: [`../bs-drive/`](../bs-drive/README.md), whose `import` verb does the
+import as well.
+
 `--check` takes the flag too, and refuses an `MSA` question without it, as the
 run that writes does. A blank is a mapping, never a bare list of answers:
 `- [3, three]` under `blanks:` is refused, since `- 3` and `- three` written one
