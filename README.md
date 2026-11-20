@@ -440,7 +440,11 @@ one file two ways, and that makes it, with `quiz-defaults`, the commands that
 need PyYAML. A question with [several blanks](extras/bs-yaml-quiz/README.md#several-blanks)
 is taken as `bs-yaml-quiz.py --msa-as-sa` writes it, its first blank in the
 CSV, and the run's steps by hand list the other blanks with every answer each
-takes, to add in the Question Library before *Add Existing*.
+takes, to add in the Question Library before *Add Existing*. An `MC` or `MS`
+question's options are [shuffled](extras/bs-yaml-quiz/README.md#shuffled-options)
+unless it says `shuffle: false`, which the CSV cannot carry either: the steps
+tick *Randomize answer order* on each, before *Add Existing* too, and `--check`
+reads each quiz question's back.
 
 **Every key of the block is a flag too**, which wins over the block, so a quiz
 whose questions are written in Brightspace needs no file:
@@ -454,7 +458,8 @@ for `Quiz 6`, or else from the course's last quiz.
 `lockdown_domains` and `visible`, flags of the same names, and `--go` takes
 every step the API has no route for through
 [`extras/bs-drive/`](extras/bs-drive/README.md) when `chromium` is on `PATH`
-and Python has `websocket-client`: the questions in, the blanks, Add Existing,
+and Python has `websocket-client`: the questions in, the blanks, the options
+shuffled, Add Existing,
 LockDown and its sites, then the quiz shown. `--by-hand`, or
 `BRIGHTSPACE_BY_HAND` set, prints them instead. Respondus renames a quiz it
 guards, *Quiz 9- Requires Respondus LockDown Browser*, and `setup-quiz` and
@@ -812,8 +817,10 @@ YAML. `setup-quiz` then makes the quiz the questions go into, from the
 
 [`extras/bs-drive/`](extras/bs-drive/README.md) sets what the API has no route
 for, the header and footer, special access, LockDown Browser and the visibility
-switch, by driving the quiz's editor page in a headless Chromium with this
-tool's session, one verb per setting, each read back from a fresh load.
+switch, and puts a quiz's questions in from its CSV and YAML, the import, an
+`MSA` question's blanks, the options shuffled and *Add Existing*, by driving
+the web page in a headless Chromium with this tool's session, one verb per
+setting, each read back from a fresh load.
 
 ## Tests
 

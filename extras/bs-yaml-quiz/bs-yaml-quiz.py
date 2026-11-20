@@ -23,6 +23,11 @@ A `brightspace:` block beside the questions says where the quiz goes and when
 it runs, for brightspace.py setup-quiz. The CSV never carries it: here it only
 has to be a block of text values, and what each means is setup-quiz's.
 
+An MC or MS question's options are shuffled for each student unless it says
+`shuffle: false`. The CSV has no row for that either, so a run prints the
+questions whose "Randomize answer order" is to be ticked after the import,
+which bs-drive's shuffle verb, and setup-quiz with it, do in the editor.
+
 Going from a CSV, nothing is written that does not convert back to the same
 rows, and the run says when the bytes differ as well -- in line endings, say.
 A row this tool does not know stops it, rather than being dropped.
@@ -58,10 +63,10 @@ YAML_TYPES = TYPES + ("MSA",)
 # exactly one of text (Markdown), html (as it goes in) and plain_text (no HTML).
 KEYS = ("title", "type", "id", "points", "difficulty", "image", "scoring",
         "text", "html", "plain_text", "initial_text", "answer_key", "answers", "blanks", "width",
-        "rows", "options", "correct", "weights", "true_feedback", "false_feedback", "choices",
+        "rows", "options", "shuffle", "correct", "weights", "true_feedback", "false_feedback", "choices",
         "matches", "items", "hint", "feedback")
 TEXTS = ("text", "html", "plain_text")
-OWN = {"MC": {"options"}, "MS": {"options", "scoring"}, "SA": {"answers", "width", "rows"},
+OWN = {"MC": {"options", "shuffle"}, "MS": {"options", "scoring", "shuffle"}, "SA": {"answers", "width", "rows"},
        "MSA": {"blanks", "width", "rows"}, "WR": {"initial_text", "answer_key"},
        "TF": {"correct", "weights", "true_feedback", "false_feedback"},
        "M": {"choices", "matches", "scoring"}, "O": {"items", "scoring"}}
@@ -519,6 +524,7 @@ def question_rows(q, where, msa_as_sa=False):
                          number(q.get("width", WIDTH), where, "width")])
         rows += answer_rows(answers, where)
     if kind in ("MC", "MS"):
+        truth(q.get("shuffle", "true"), where, "shuffle")     # the editor's to set: see shuffled
         options = spliced(q.get("options"))
         if not isinstance(options, list) or not options:
             raise Failed(f"{where}: a {kind} question needs its options")
@@ -584,6 +590,31 @@ def msa_by_hand(data, where):
             lines.append(f"  blank {i}, for: {b['prompt'].strip()}")
             lines += [f"    {describe(a, at)}" for a in blanks[i - 1][1]]
     return lines
+
+
+# The editor's "Randomize answer order", which D2L's import leaves off and its
+# CSV has no row for. On unless a question says shuffle: false, because a quiz
+# is written with its right option first more often than not: 71 of the 96 MC
+# and MS questions in three courses' quizzes on 2026-11-19, which unshuffled
+# is option A in three questions of four.
+def shuffled(data, where):
+    """[(number, title, whether its options are shuffled)] for every MC and MS
+    question, in the file's order: what bs-drive's shuffle verb makes the
+    library hold, finding each by its title, which may be None here."""
+    out = []
+    for n, q in enumerate(data["questions"], 1):
+        if isinstance(q, dict) and q.get("type") in ("MC", "MS"):
+            title = q.get("title")
+            at = f"{where}, question {n}" + (f" ({title})" if title else "")
+            out.append((n, title, truth(q.get("shuffle", "true"), at, "shuffle")))
+    return out
+
+
+def shuffle_steps(data, where):
+    """The questions whose options are to be shuffled, as a run prints them."""
+    on = [f"  {t}" if t else f"  question {n}" for n, t, s in shuffled(data, where) if s]
+    return (["Then by hand, in the Question Library after the import, since the CSV cannot carry it: "
+             "Randomize answer order on each of"] + on) if on else []
 
 
 def msa_steps(data, where):
@@ -920,7 +951,7 @@ def main(argv=None):
                 with open(dest, "w", encoding="utf-8", newline="") as f:
                     f.write(text)
                 print(f"wrote {dest}: {len(data['questions'])} questions")
-                for line in msa_steps(data, str(src)):
+                for line in msa_steps(data, str(src)) + shuffle_steps(data, str(src)):
                     print(line)
             elif src.suffix == ".csv":
                 dest = pathlib.Path(args.output) if args.output else src.with_suffix(".yml")

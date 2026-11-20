@@ -223,7 +223,7 @@ check("its one box takes the first blank's answers alone, the others printed for
       r[3:8] == [["Points", "2", "", "", ""], ["InputBox", "1", "40", "", ""],
                  ["Answer", "100", "3", "", ""], ["Answer", "100", "three", "", ""], ["", "", "", "", ""]], r[3:8])
 run("msa.yml", "--check", "--msa-as-sa", lacks=["not what", "missing", "Then by hand"])
-run("example.yml", "--msa-as-sa", lacks=["Then by hand"])
+run("example.yml", "--msa-as-sa", lacks=["blank 1 of"])
 check("--msa-as-sa changes nothing in a quiz without an MSA question", (tmp / "example.csv").read_bytes() == raw)
 run("msa.csv", "-o", "msa-back.yml", has=["byte for byte"])
 run("msa-back.yml", "-o", "msa-back.csv")
@@ -324,6 +324,25 @@ write_csv("marker.csv", [["NewQuestion", "MC"], ["QuestionText", "<p>Pick.</p>",
                          ["Option", "100", "x", "NOT HTML"], []])
 run("marker.csv", ok=False, has=["fourth cell is HTML or nothing"])
 
+# --- shuffled options: the editor's, never the CSV's -------------------------------------
+SHUF = ("questions:\n- title: One\n  type: MC\n  text: Pick.\n  options:\n  - 100: a\n  - 0: b\n"
+        "- title: Two\n  type: MS\n  text: Pick.\n  options:\n  - 1: a\n  - 0: b\n"
+        "- title: Three\n  type: MC\n  shuffle: false\n  text: Pick.\n  options:\n  - 0: '1'\n  - 100: '2'\n"
+        "- title: Four\n  type: SA\n  text: Say.\n  answers: [x]\n")
+yml("shuf.yml", SHUF)
+run("shuf.yml", has=["Randomize answer order on each of\n  One\n  Two\n"], lacks=["  Three"])
+yml("plain.yml", SHUF.replace("  shuffle: false\n", ""))
+run("plain.yml")
+check("shuffle never reaches the CSV", (tmp / "shuf.csv").read_bytes() == (tmp / "plain.csv").read_bytes())
+check("shuffled: every MC and MS question, on unless it says shuffle: false",
+      bq.shuffled(bq.load(SHUF), "x") == [(1, "One", True), (2, "Two", True), (3, "Three", False)],
+      bq.shuffled(bq.load(SHUF), "x"))
+check("an untitled question is named by its number",
+      bq.shuffle_steps(bq.load(SHUF.replace("- title: One\n  type", "- type")), "x")[1] == "  question 1")
+yml("all-off.yml", SHUF.replace("  type: MC\n  text", "  type: MC\n  shuffle: false\n  text")
+                       .replace("  type: MS\n", "  type: MS\n  shuffle: no\n"))
+run("all-off.yml", lacks=["Randomize"])
+
 # --- what it refuses ----------------------------------------------------------------------
 def refuses(name, text, says):
     yml(name, text)
@@ -331,6 +350,10 @@ def refuses(name, text, says):
 
 refuses("tab.yml", "questions:\n- type: SA\n  text: |\n    ```\n    \tx\n    ```\n  answers: [x]\n", "holds a tab")
 refuses("key.yml", "questions:\n- type: SA\n  text: Hi.\n  answer: x\n", "a SA question has no answer")
+refuses("shuffle.yml", "questions:\n- type: MC\n  shuffle: maybe\n  text: Hi.\n  options:\n  - 100: a\n",
+        "shuffle is true or false, not 'maybe'")
+refuses("shuffle-sa.yml", "questions:\n- type: SA\n  shuffle: true\n  text: Hi.\n  answers: [x]\n",
+        "a SA question has no shuffle")
 refuses("type.yml", "questions:\n- text: Hi.\n  answers: [x]\n", "type is one of")
 refuses("none.yml", "questions:\n- type: SA\n  text: Hi.\n", "needs answers")
 refuses("weight.yml", "questions:\n- type: MC\n  text: Hi.\n  options:\n  - just text\n", "is `- <weight>: <text>`")

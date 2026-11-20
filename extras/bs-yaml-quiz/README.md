@@ -66,6 +66,7 @@ question is:
 | `blanks` | `MSA`: two or more, in order, each a `prompt:` and its `answers:`, which are as `SA`'s. |
 | `width`, `rows` | `SA`, `MSA`: the input box, 40 wide and 1 row when left out. `width: null` leaves the box out. |
 | `options` | `MC`, `MS`: in order, each `- <weight>: <text>`, the weight being the percent it earns. `feedback:` beside one is shown when it is chosen. An option is one line of inline Markdown: see [Options, choices and matches](#options-choices-and-matches). |
+| `shuffle` | `MC`, `MS`: `false` keeps the options in the order written. Left out, they are shuffled for each student: see [Shuffled options](#shuffled-options). |
 | `correct` | `TF`: `true` or `false`. `weights: [TRUE's, FALSE's]` instead of 100 and 0, and `true_feedback` and `false_feedback`. |
 | `choices`, `matches` | `M`: choices numbered from 1 in order, and matches as `- <choice's number>: <text>`. Each is one line of inline Markdown, as an option is. |
 | `items` | `O`: in the right order, each its text, or `text:` with `format:` and `feedback:`. |
@@ -207,6 +208,36 @@ ends with, between the import and *Add Existing*, so a quiz gets its questions
 whole; and where the CSV is missing or stale, the command it names to make it
 says `--msa-as-sa`. The web page's CSV to download is made the same way.
 
+## Shuffled options
+
+An `MC` or `MS` question's options are shuffled for each student, unless the
+question says `shuffle: false`, which keeps them in the order written: options
+that are numbers in order, say, or one that only makes sense last. Shuffled is
+the default because a quiz is written with its right option first more often
+than not, 71 of the 96 `MC` and `MS` questions in three courses' quizzes on
+2026-11-19, and in the order written that is option A in three questions of
+four.
+
+```yaml
+- title: Q4 How many times
+  type: MC
+  shuffle: false
+  text: How many times does the loop run?
+  options:
+  - 0: '2'
+  - 100: '3'
+  - 0: '4'
+```
+
+The CSV has no row for it, and D2L's import leaves every question's
+*Randomize answer order* off, so the CSV is the same with the key or without
+it, and a run ends by listing the questions whose box is to be ticked in the
+Question Library. **`bs-drive.py shuffle` ticks them** from the same YAML,
+before *Add Existing*, or afterwards in the quiz's copies too:
+[`../bs-drive/`](../bs-drive/README.md). `setup-quiz --go` runs it between the
+import and *Add Existing*, and `setup-quiz --check` reads each quiz question's
+setting back.
+
 ## Where it goes on Brightspace
 
 A file can also carry a `brightspace:` block, above its questions, saying
@@ -261,7 +292,8 @@ The quiz is made hidden, to be shown once its questions are in. No API route
 creates a question, nor sets LockDown Browser, so **`setup-quiz --go` hands
 those to [`bs-drive`](../bs-drive/README.md)** when it can drive a browser: it
 writes the CSV, imports it into a library section named for the quiz, adds the
-blanks of each `MSA` question, puts the questions in the quiz, sets LockDown
+blanks of each `MSA` question, shuffles the options of each `MC` and `MS`
+question that does not say otherwise, puts the questions in the quiz, sets LockDown
 and its sites, and then shows the quiz if `visible: true`, each step read back
 before the next. One call, about five and a half minutes for a two-question
 quiz with one `MSA` question, LockDown and two sites, on 2026-11-19. Where it
@@ -305,6 +337,9 @@ tool handles and one of which it cannot:
   over the same program, or an `MSA` in the YAML, written with `--msa-as-sa`
   as a short answer with every prompt and its first blank, the other blanks
   added by hand: see [Several blanks](#several-blanks).
+- **Options import in the order written.** The CSV has no row for a
+  question's *Randomize answer order*, and the import leaves it off: see
+  [Shuffled options](#shuffled-options).
 - **Do not open the CSV in Excel and save it.** Its "CSV UTF-8" adds a BOM and
   mangles the HTML.
 - **Importing puts questions in the Question Library only.** The quiz itself

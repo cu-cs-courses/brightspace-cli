@@ -3373,6 +3373,7 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
             # among the steps by hand that quiz_remainder prints.
             csv_text = fmt.to_csv(data, str(path), msa_as_sa=True)
             msa = fmt.msa_by_hand(data, str(path))
+            shuffle = fmt.shuffled(data, str(path))
         except fmt.Failed as e:
             raise Failed(str(e))
         block = data.get("brightspace") or {}
@@ -3458,11 +3459,11 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
             plan["description_html"] = fmt.md_html(plan["description"], f"{at} description")
         except fmt.Failed as e:
             raise Failed(str(e))
-    plan |= {"path": path, "questions": None, "csv_state": None, "msa": [], "csv_text": csv_text}
+    plan |= {"path": path, "questions": None, "csv_state": None, "msa": [], "shuffle": [], "csv_text": csv_text}
     if path:
         csv_path = path.with_suffix(".csv")
         have = csv_path.read_bytes().decode("utf-8") if csv_path.exists() else None
-        plan |= {"csv": csv_path, "questions": len(data["questions"]), "msa": msa,
+        plan |= {"csv": csv_path, "questions": len(data["questions"]), "msa": msa, "shuffle": shuffle,
                  "worth": sum(float(q.get("points", fmt.POINTS)) for q in data["questions"]),
                  "csv_state": None if have is None else "current" if have == csv_text else "stale"}
     return plan
@@ -3526,6 +3527,11 @@ def quiz_remainder(plan, template, shown, done=()):
             # questions go into the quiz, so it gets them whole.
             steps.append("Question Library -> each MSA question -> the blanks after its first, which the CSV "
                          "cannot carry:\n" + "\n".join("    " + x for x in plan["msa"]))
+        on = [t or f"question {n}" for n, t, s in plan["shuffle"] if s]
+        if on:
+            # Before Add Existing too, as the blanks are: see drive_steps.
+            steps.append("Question Library -> each of these -> Randomize answer order, which the CSV cannot "
+                         "carry:\n" + "\n".join("    " + t for t in on))
         steps.append(f"{plan['name']} -> Add Existing -> the {plan['questions']} questions it imported.")
     else:
         steps = [f"Its questions: {plan['name']} -> Add/Edit Questions, written there or imported\n"
@@ -3595,9 +3601,20 @@ def check_quiz(s, ou, plan, by_hand=False):
         if item:
             row("out of", plan.get("points", "-"), f"{item.get('MaxPoints'):g}",
                 "points" not in plan or float(plan["points"]) == item.get("MaxPoints"))
-        got = str(len(quiz_questions(s, ou, q["QuizId"])))
+        held = quiz_questions(s, ou, q["QuizId"])
+        got = str(len(held))
         row("questions", str(plan["questions"]) if plan["questions"] is not None else "-", got,
             plan["questions"] is None or got == str(plan["questions"]))
+        if plan["shuffle"]:
+            # QuestionInfo's Randomize, on a multiple choice (type 1) and a multi-select (4).
+            # A question not in the quiz is the questions row's difference, not this one's.
+            by_name = {x.get("Name"): bool((x.get("QuestionInfo") or {}).get("Randomize")) for x in held
+                       if x.get("QuestionTypeId") in (1, 4)}
+            mine = [(t, on) for _, t, on in plan["shuffle"] if t in by_name]
+            off = [f"{t} {'shuffled' if by_name[t] else 'in order'}" for t, on in mine if by_name[t] != on]
+            row("options shuffled", f"{sum(on for _, _, on in plan['shuffle'])} of {len(plan['shuffle'])}",
+                (f"{sum(by_name[t] for t, _ in mine)} of {len(mine)}" if mine else "(none in the quiz yet)")
+                + (": " + "; ".join(off) if off else ""), not off)
         if "description" in plan:
             want, got = text_pair(plan["description_html"], text_of((q.get("Description") or {}).get("Text")))
             cut = lambda t: t if len(t) <= 32 else t[:31] + "…"
@@ -3666,13 +3683,17 @@ def drive_read_lockdown(s, ou, name):
 
 def drive_steps(plan, ou):
     """[(the step's key, bs-drive's argv)] for what setup-quiz cannot do through
-    the API: the questions, in three verbs, then LockDown Browser."""
+    the API: the questions, in up to four verbs, then LockDown Browser."""
     steps = []
     if plan["path"]:
         section = plan["name"]
         steps.append(("questions", ["import", str(ou), str(plan["csv"]), "--section", section, "--go"]))
         if plan["msa"]:
             steps.append(("questions", ["blanks", str(ou), str(plan["path"]), "--section", section, "--go"]))
+        # The import leaves every option in order; a question added to the quiz
+        # after this has its options shuffled from the start.
+        if any(on for _, _, on in plan["shuffle"]):
+            steps.append(("questions", ["shuffle", str(ou), str(plan["path"]), "--section", section, "--go"]))
         steps.append(("questions", ["add", str(ou), plan["name"], str(plan["csv"]), "--section", section, "--go"]))
     if "lockdown" in plan:
         if as_flag(plan["lockdown"]):
@@ -3828,7 +3849,7 @@ def cmd_setup_quiz(args):
                 break
             done.add(key)
         if failed:
-            done.discard("questions" if failed in ("import", "blanks", "add") else failed)
+            done.discard("questions" if failed in ("import", "blanks", "shuffle", "add") else failed)
             print(f"\nbs-drive stopped at {failed}; what it did before that is in place and read back.")
         elif as_flag(plan.get("visible")) and plan["path"] and made:
             if show_quiz(s, ou, made["QuizId"]):

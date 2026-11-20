@@ -14,6 +14,7 @@ fresh load of the page and says `checked on the server:`.
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
     bs-drive.py import   COURSE FILE.csv --section NAME [--go]
     bs-drive.py blanks   COURSE FILE.yml --section NAME [--go]
+    bs-drive.py shuffle  COURSE FILE.yml --section NAME [--go]
     bs-drive.py add      COURSE QUIZ FILE.csv --section NAME [--go]
     bs-drive.py shot     COURSE QUIZ FILE.png
 
@@ -25,8 +26,8 @@ page, prints what is there and writes nothing.** With it, the verb writes,
 closes the browser, opens the page again and reads the setting back; a readback
 that differs from what was asked exits 1.
 
-It needs `chromium` on `PATH` and `websocket-client`, and `blanks` needs
-`pyyaml` too, since it reads the quiz through `bs-yaml-quiz`:
+It needs `chromium` on `PATH` and `websocket-client`, and `blanks` and
+`shuffle` need `pyyaml` too, since it reads the quiz through `bs-yaml-quiz`:
 
     nix-shell -p chromium python3Packages.websocket-client python3Packages.pyyaml --run \
       './bs-drive.py visible 120 "Progress Exam 3"'
@@ -99,6 +100,20 @@ either; that blank is added by hand. The points are shared among the blanks,
 *part marks per blank*, which is Brightspace's default for a short answer with
 several.
 
+**`shuffle`** sets each question's *Randomize answer order*, which the CSV
+cannot carry and D2L's import leaves off. It reads the same YAML, where an `MC`
+or `MS` question's options are shuffled unless it says `shuffle: false`, opens
+each such question in the section by its title, and makes its box say what the
+file says, off as well as on. One browser goes from question to question, since
+the editor's *Save* and *Cancel* both land on the section's list, and a fresh
+one reads back each question it changed. **A question already in a quiz is
+changed there too**: *Add Existing* gives the quiz a copy, and *Save* on the
+library's question then asks which copies the change goes to, the library's
+ticked and each quiz's not; the verb ticks them all, names the quizzes, and
+reads each quiz's copy back through the API. So a quiz made before its options
+were shuffled is fixed with the same verb on its section. Three questions, one
+of them changed, took a minute on 2026-11-19.
+
 **`add`** is the quiz's *Add Existing*: it opens *Browse Question Library*,
 opens the section, ticks the question of each title the CSV has, checks that
 exactly those are ticked and no section is, and imports them. It reads the
@@ -120,10 +135,12 @@ plan. Run by hand, they are:
     bs-yaml-quiz.py q9.yml --msa-as-sa
     bs-drive.py import   120 q9.csv --section 'Quiz 9' --go
     bs-drive.py blanks   120 q9.yml --section 'Quiz 9' --go
+    bs-drive.py shuffle  120 q9.yml --section 'Quiz 9' --go
     bs-drive.py add      120 'Quiz 9' q9.csv --section 'Quiz 9' --go
     bs-drive.py lockdown 120 'Quiz 9' --domains 'cu-cs-courses.site, docs.oracle.com' --go
 
-`setup-quiz --check` reads LockDown back through `lockdown --json`. The web page
+`setup-quiz --check` reads LockDown back through `lockdown --json`, and each
+question's shuffle through the API. The web page
 sets `BRIGHTSPACE_BY_HAND`, since five minutes is longer than a request
 should wait.
 
@@ -206,6 +223,15 @@ the same things.
   LockDown required with no sites. The verb opens the section until the box is
   on the screen, by its size and `offsetParent`, and checks the box and the
   typed line before Save.
+- **Randomize answer order is the same box on an MC and an MS question**,
+  `input[name="question.choiceInteraction.shuffle"]`, under the options. The
+  quiz-questions API reads it on a quiz's copy as `QuestionInfo`'s `Randomize`,
+  on a multiple choice (`QuestionTypeId` 1) and a multi-select (4).
+- **Save on a question that is in a quiz goes to *Question In Use***,
+  `shared_question.d2l` in a frame of its own: a box per place the question is
+  used, `gridObjects_cb`, labelled *Select <place>*, the library's ticked and
+  each quiz's not, and a *Save* of its own, which a click works. The editor's
+  *Cancel* goes back to the section's list as its *Save* does.
 - **The quiz-questions API reads a short answer's blanks**: `QuestionInfo`'s
   `Blanks`, each with its `Answers` and an `EvaluationType`. It covers only
   questions already in a quiz; the library has no read route.

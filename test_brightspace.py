@@ -281,8 +281,9 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"Objects": [
                 {"QuestionTypeId": 8, "QuestionText": {"Text": "Upload your four programs here."}}], "Next": None})
         if re.fullmatch(r"quizzes/\d+/questions/", r):
-            made = COPIED.get(int(re.search(r"\d+", r).group()), 0)
-            return self.send(200, {"Objects": [{"QuestionTypeId": 8}] * made, "Next": None})
+            made = COPIED.get(int(re.search(r"\d+", r).group()), 0)     # a count, or the questions themselves
+            return self.send(200, {"Objects": made if isinstance(made, list) else [{"QuestionTypeId": 8}] * made,
+                                   "Next": None})
         if r == "quizzes/1/attempts/": return self.send(200, {"Objects": ATTEMPTS, "Next": None})
         if r == "quizzes/2/attempts/": return self.send(200, {"Objects": [], "Next": None})
         if r == "grades/categories/":
@@ -1314,6 +1315,20 @@ if COOKIES_OK:
         COPIED[made["QuizId"]] = 2
         run("setup-quiz", q13, "--check", has=["2026-10-13 14:00", "8 minutes", "Quiz 13", "q13.csv", "current"],
             lacks=["DIFFERS"])
+        # An MC question's options are shuffled unless it says shuffle: false, which
+        # --check reads off the quiz's own copy: QuestionInfo's Randomize.
+        def copies(randomize):
+            return [{"QuestionTypeId": 8, "Name": "Q1 What it prints"},
+                    {"QuestionTypeId": 1, "Name": "Q2 Why", "QuestionInfo": {"Randomize": randomize, "Enumeration": 6}}]
+        COPIED[made["QuizId"]] = copies(False)
+        t = run("setup-quiz", q13, "--check", ok=False, has=["DIFFERS"])
+        fails += not re.search(r"\noptions shuffled +1 of 1 +0 of 1: Q2 Why in order +DIFFERS\n", t)
+        COPIED[made["QuizId"]] = copies(True)
+        run("setup-quiz", q13, "--check", has=["options shuffled  1 of 1"], lacks=["DIFFERS"])
+        run("setup-quiz", quiz_yml("q13.yml", questions=QUESTIONS.replace("  type: MC\n", "  type: MC\n  shuffle: false\n")),
+            "--check", ok=False, has=["Q2 Why shuffled", "DIFFERS"])
+        quiz_yml("q13.yml")
+        COPIED[made["QuizId"]] = 2
         # A date moved in the file and not on Brightspace, and a question changed
         # after the CSV was made, are what --check is for.
         quiz_yml("q13.yml", end="2026-10-13 14:15", questions=QUESTIONS.replace("- five", "- five\n  - 5.0"))
@@ -1387,7 +1402,8 @@ if COOKIES_OK:
                  f"Upload a File -> q19.csv, which bs-yaml-quiz.py {q19} --msa-as-sa makes.\n",
                  " 2. Question Library -> each MSA question -> the blanks after its first, which the CSV cannot "
                  "carry:\n    question 3 (Q3 Two names): blank 1 of 2 imported\n      blank 2, for: `y` holds\n"
-                 "        2\n        2.0  [50%]\n 3. Quiz 19 -> Add Existing -> the 3 questions it imported."],
+                 "        2\n        2.0  [50%]\n 3. Question Library -> each of these -> Randomize answer order, "
+                 "which the CSV cannot carry:\n    Q2 Why\n 4. Quiz 19 -> Add Existing -> the 3 questions it imported."],
             lacks=["blank 2, for: `x`", "Traceback"])
         fails += (len(QUIZZES_MADE), len(ITEMS)) != before
         subprocess.run([sys.executable, str(pathlib.Path(SCRIPT).parent / "extras" / "bs-yaml-quiz" / "bs-yaml-quiz.py"),

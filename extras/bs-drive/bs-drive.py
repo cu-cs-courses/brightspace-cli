@@ -11,6 +11,7 @@ a fresh load; without --go nothing is written.
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
     bs-drive.py import   COURSE FILE.csv --section NAME [--go]
     bs-drive.py blanks   COURSE FILE.yml --section NAME [--go]
+    bs-drive.py shuffle  COURSE FILE.yml --section NAME [--go]
     bs-drive.py add      COURSE QUIZ FILE.csv --section NAME [--go]
     bs-drive.py shot     COURSE QUIZ FILE.png
 
@@ -836,6 +837,147 @@ def verb_blanks(a):
         sys.exit(1)
 
 
+# The editor's "Randomize answer order", the same box on an MC and an MS question.
+SHUFFLE = "findAll(e => e.tagName === 'INPUT' && e.name === 'question.choiceInteraction.shuffle')"
+
+
+def wait_for(p, js, secs=30):
+    """js's value once it is truthy, looked for once a second until secs have passed."""
+    end = time.time() + secs
+    while time.time() < end:
+        got = p.js(js)
+        if got:
+            return got
+        time.sleep(1)
+    return None
+
+
+def shuffle_box(p, title):
+    """Open title from the section's list, which the page is showing, and read
+    its box: True or False, or None when the editor shows no such box."""
+    p.click("a", title, settle=2)
+    got = wait_for(p, f"(() => {{ const es = {SHUFFLE}; return es.length ? [es[0].checked] : null; }})()")
+    return got[0] if got else None
+
+
+# The page Save goes to when the question is in a quiz already: Add Existing put
+# a copy there, and a box per place says which copies the change goes to, the
+# library's ticked and every quiz's not. The verb ticks them all.
+PLACES = "findAll(e => e.tagName === 'INPUT' && e.type === 'checkbox' && e.name === 'gridObjects_cb')"
+
+
+def save_question(b, p, title):
+    """Save the open question, every copy of it in a quiz included, and come back
+    to the section's list. Returns the quizzes whose copies the change went to.
+    Called inside a try whose finally closes the browser, as back_to_list is."""
+    # A mouse click on Save sends nothing here; Enter on the focused button submits the form.
+    p.js("findAll(e => e.tagName === 'BUTTON' && visible(e) && textOf(e) === 'Save')[0].focus()")
+    b.key("Enter")
+    listed = f"{ROWS}.some(r => r.name === {json.dumps(title)})"
+    landed = wait_for(p, f"({listed} && 'list') || ({PLACES}.length && 'in use')")
+    if landed == "list":
+        return []
+    if landed != "in use":
+        sys.exit(f"{title}: Save did not go back to the section's list")
+    places = p.js(f"{PLACES}.map(e => labelOf(e).replace(/^Select /, ''))")
+    quizzes = [x for x in places if x != "Question Library"]
+    print(f"  it is in {'; '.join(quizzes)} too, whose copies the change goes to as well")
+    for k in range(len(places)):
+        if not p.js(f"{PLACES}[{k}].checked"):
+            r = p.js(f"(() => {{ const e = {PLACES}[{k}]; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()")
+            b.click_xy(r["x"], r["y"]); time.sleep(0.5)
+    if not p.js(f"{PLACES}.every(e => e.checked)"):
+        sys.exit(f"{title}: not every place it is used in could be ticked; nothing saved")
+    p.click_pred("e => e.tagName === 'BUTTON' && textOf(e) === 'Save' && /shared_question/.test(e.ownerDocument.location.href)",
+                 settle=1, what="the Save of the page that lists where the question is used")
+    if not wait_for(p, listed):
+        sys.exit(f"{title}: Save did not go back to the section's list")
+    return quizzes
+
+
+def quiz_shuffles(ou, name):
+    """{question name: whether its options are shuffled} in a quiz, read through
+    the API: QuestionInfo's Randomize, on a multiple choice and a multi-select."""
+    qi, _ = quiz(ou, name)
+    bp = brightspace_module()
+    s = bp.open_session(argparse.Namespace(base_url=None, course=None))
+    r = s.api(f"/d2l/api/le/{s.versions()[0]}/{ou}/quizzes/{qi}/questions/")
+    return {q.get("Name"): bool((q.get("QuestionInfo") or {}).get("Randomize"))
+            for q in (r.get("Objects", []) if isinstance(r, dict) else r) if q.get("QuestionTypeId") in (1, 4)}
+
+
+def back_to_list(b, p, title):
+    """The editor's Cancel, which goes back to the list without saving."""
+    p.click("button, d2l-button", "Cancel", settle=2)
+    if not wait_for(p, f"{ROWS}.some(r => r.name === {json.dumps(title)})"):
+        sys.exit(f"Cancel on {title!r} did not go back to the section's list")
+
+
+def verb_shuffle(a):
+    """Every MC and MS question's "Randomize answer order" as the quiz file has
+    it, on unless a question says shuffle: false. One browser goes from question
+    to question, since Save and Cancel both land on the section's list; a fresh
+    one reads back those it changed, and the API each quiz's copy it changed:
+    a question already in a quiz is changed there too."""
+    ou = org_unit(a.course)
+    yq = yaml_quiz()
+    try:
+        want = yq.shuffled(yq.load(pathlib.Path(a.file).read_text()), a.file)
+    except yq.Failed as e:
+        sys.exit(str(e))
+    if not want:
+        sys.exit(f"{a.file} has no MC or MS question")
+    untitled = [str(n) for n, t, _ in want if not t]
+    if untitled:
+        sys.exit(f"{a.file}: question {', '.join(untitled)} has no title, which is how the library finds it")
+    b, p = library(ou, a.section)
+    changed = []
+    try:
+        names = [r["name"] for r in p.js(ROWS) if r["type"] != "-"]
+        bad = [t for _, t, _ in want if names.count(t) != 1]
+        if bad:
+            sys.exit(f"{a.section!r} does not hold exactly one of each: {'; '.join(bad)}; import it first, once")
+        for _, title, on in want:
+            have = shuffle_box(p, title)
+            if have is None:
+                sys.exit(f"{title}: the editor shows no Randomize answer order box")
+            print(f"{title}: options {'shuffled' if have else 'in order'}"
+                  + ("" if have == on else f"; the file has them {'shuffled' if on else 'in order'}"))
+            if have == on or not a.go:
+                back_to_list(b, p, title); continue
+            r = p.js(f"(() => {{ const e = {SHUFFLE}[0]; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()")
+            b.click_xy(r["x"], r["y"]); time.sleep(1)
+            if p.js(f"{SHUFFLE}[0].checked") != on:
+                sys.exit(f"{title}: the box did not change; nothing saved")
+            changed.append((title, on, save_question(b, p, title)))
+    finally:
+        b.close()
+    if not changed:
+        print("nothing written" + ("" if a.go else "; add --go")); return
+    b, p = library(ou, a.section)
+    bad = False
+    try:
+        for title, on, _ in changed:
+            got = shuffle_box(p, title)
+            back_to_list(b, p, title)
+            bad |= got != on
+            print(f"  checked on the server: {title}, options "
+                  + ("shuffled" if got else "in order") + ("" if got == on else ", NOT as the file has them"))
+    finally:
+        b.close()
+    for name in sorted({x for _, _, quizzes in changed for x in quizzes}):
+        held = quiz_shuffles(ou, name)
+        for title, on, quizzes in changed:
+            if name in quizzes:
+                got = held.get(title)
+                bad |= got != on
+                print(f"  checked on the server: {title} in {name}, options "
+                      + ("missing" if got is None else "shuffled" if got else "in order")
+                      + ("" if got == on else ", NOT as the file has them"))
+    if bad:
+        sys.exit(1)
+
+
 # Add Existing's dialog draws its rows in closed shadow roots, so a box is found
 # through the DOM domain and its row read from the box itself: the row of a
 # question reads "<title> <type> <n> points", a section's "<name> Section".
@@ -984,6 +1126,10 @@ def main():
     s.add_argument("course"); s.add_argument("file", help="the quiz's YAML, whose CSV was imported with --msa-as-sa")
     s.add_argument("--section", required=True, help="the section the questions were imported into")
     s.add_argument("--go", action="store_true"); s.set_defaults(fn=verb_blanks)
+    s = sub.add_parser("shuffle", help="each MC and MS question's Randomize answer order, as its quiz YAML has it")
+    s.add_argument("course"); s.add_argument("file", help="the quiz's YAML; an MC or MS question is shuffled unless it says shuffle: false")
+    s.add_argument("--section", required=True, help="the section the questions were imported into")
+    s.add_argument("--go", action="store_true"); s.set_defaults(fn=verb_shuffle)
     s = sub.add_parser("add", help="Add Existing: a section's questions, by the CSV's titles, into a quiz"); common(s)
     s.add_argument("file", help="the CSV whose titles say which questions")
     s.add_argument("--section", required=True, help="the library section they were imported into")
