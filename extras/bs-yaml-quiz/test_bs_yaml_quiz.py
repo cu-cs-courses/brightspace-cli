@@ -195,9 +195,7 @@ MSA = """questions:
     - three
   - prompt: "`y` holds"
     answers:
-    - 2
-    - 50: "2.0"
-    - 100: "^ *2 *$"
+    - 100: '^ *2(\\.0+)? *$'
       regexp: true
 - type: SA
   text: Plain one.
@@ -210,7 +208,7 @@ run("msa.yml", "--check", ok=False, has=["--msa-as-sa"], lacks=["missing"])
 out = run("msa.yml", "--msa-as-sa", has=[
     "wrote msa.csv: 2 questions",
     "question 1 (Q1 Two names): blank 1 of 2 imported",
-    "  blank 2, for: `y` holds\n    2\n    2.0  [50%]\n    ^ *2 *$  [regexp]\n"])
+    "  blank 2, for: `y` holds\n    ^ *2(\\.0+)? *$  [regexp]\n"])
 check("the blanks after the first are all that is printed: blank 1's answers are in the CSV",
       "    3\n" not in out and "three" not in out and "blank 1," not in out, out)
 r = rows("msa.csv")
@@ -223,6 +221,14 @@ check("its one box takes the first blank's answers alone, the others printed for
       r[3:8] == [["Points", "2", "", "", ""], ["InputBox", "1", "40", "", ""],
                  ["Answer", "100", "3", "", ""], ["Answer", "100", "three", "", ""], ["", "", "", "", ""]], r[3:8])
 run("msa.yml", "--check", "--msa-as-sa", lacks=["not what", "missing", "Then by hand"])
+# What a blank cannot hold, measured 2026-11-24: part credit for one answer, which
+# Brightspace turns into the blank's share, and a blank of both answer types.
+yml("msa-part.yml", MSA.replace("    - 100: '^ *2(\\.0+)? *$'\n      regexp: true\n", '    - 2\n    - 50: "2.0"\n'))
+run("msa-part.yml", "--msa-as-sa", ok=False, has=["blank 2's '2.0' gives part credit", "would count in full"])
+yml("msa-mixed.yml", MSA.replace("    - 100: '^ *2(\\.0+)? *$'\n", "    - 2\n    - 100: '^ *2(\\.0+)? *$'\n"))
+run("msa-mixed.yml", "--msa-as-sa", ok=False, has=["blank 2 has regular expressions and plain answers both"])
+yml("msa-first.yml", MSA.replace('    - three\n', '    - 50: three\n'))
+run("msa-first.yml", "--msa-as-sa", ok=False, has=["blank 1's 'three' gives part credit"])
 run("example.yml", "--msa-as-sa", lacks=["blank 1 of"])
 check("--msa-as-sa changes nothing in a quiz without an MSA question", (tmp / "example.csv").read_bytes() == raw)
 run("msa.csv", "-o", "msa-back.yml", has=["byte for byte"])

@@ -191,6 +191,14 @@ question 3 (Q3 Two names after the loop): blank 1 of 2 imported
 imported: [`../bs-drive/`](../bs-drive/README.md), whose `import` verb does the
 import as well.
 
+**A blank holds answers of one kind, at full marks.** Every answer of a blank is
+worth the blank's share of the question's points, whatever weight it came in
+with, so `- 50: 1001010` in a blank would count in full: it is refused, with
+the blank named, when the CSV is made. And a blank's answer type is one, Text
+or Regular Expression, for all its answers, so a blank may be all `regexp:
+true` answers, which bs-drive sets as such, but not some of each. Measured on
+a sandbox, 2026-11-24, after 100's Progress Exam 1 make-up met both.
+
 `--check` takes the flag too, and refuses an `MSA` question without it, as the
 run that writes does. A blank is a mapping, never a bare list of answers:
 `- [3, three]` under `blanks:` is refused, since `- 3` and `- three` written one

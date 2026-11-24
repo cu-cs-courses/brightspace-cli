@@ -1418,7 +1418,7 @@ if COOKIES_OK:
         # the questions go into the quiz.
         MSA_QUESTIONS = QUESTIONS + ('- title: Q3 Two names\n  type: MSA\n  text: What do they hold?\n'
                                      '  blanks:\n  - prompt: "`x` holds"\n    answers: [3, three]\n'
-                                     '  - prompt: "`y` holds"\n    answers:\n    - 2\n    - 50: "2.0"\n')
+                                     '  - prompt: "`y` holds"\n    answers:\n    - 2\n    - "2.0"\n')
         q19 = quiz_yml("q19.yml", name="Quiz 19", questions=MSA_QUESTIONS)
         before = (len(QUIZZES_MADE), len(ITEMS))
         run("setup-quiz", q19,
@@ -1426,7 +1426,7 @@ if COOKIES_OK:
                  f"Upload a File -> q19.csv, which bs-yaml-quiz.py {q19} --msa-as-sa makes.\n",
                  " 2. Question Library -> each MSA question -> the blanks after its first, which the CSV cannot "
                  "carry:\n    question 3 (Q3 Two names): blank 1 of 2 imported\n      blank 2, for: `y` holds\n"
-                 "        2\n        2.0  [50%]\n 3. Question Library -> each of these -> Randomize answer order, "
+                 "        2\n        2.0\n 3. Question Library -> each of these -> Randomize answer order, "
                  "which the CSV cannot carry:\n    Q2 Why\n 4. Quiz 19 -> Add Existing -> the 3 questions it imported."],
             lacks=["blank 2, for: `x`", "Traceback"])
         fails += (len(QUIZZES_MADE), len(ITEMS)) != before
@@ -1435,7 +1435,7 @@ if COOKIES_OK:
         run("setup-quiz", q19, has=["Upload a File -> q19.csv.\n", "blank 2, for: `y` holds"])
         run("setup-quiz", q19, "--check", ok=False, has=["q19.csv", "current", "DIFFERS"], lacks=["stale"])
         run("setup-quiz", quiz_yml("bad.yml", name="Quiz 16", questions=MSA_QUESTIONS.replace(
-            '  - prompt: "`y` holds"\n    answers:\n    - 2\n    - 50: "2.0"\n', "")),
+            '  - prompt: "`y` holds"\n    answers:\n    - 2\n    - "2.0"\n', "")),
             ok=False, has=["question 3", "one blank is a short answer, type: SA"], lacks=["Traceback"])
 
         # The same file on the page: pasted or chosen, then checked, made or compared.

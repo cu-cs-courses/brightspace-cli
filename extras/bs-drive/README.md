@@ -94,11 +94,19 @@ This verb reads the same YAML, finds each `MSA` question in the section by its
 title, adds the blanks after the first, types every answer into each, saves,
 and reads all the blanks back. A question that already has all its blanks is
 left alone; one that has something else than the first blank as imported is
-left alone too, and named. A weighted answer, `- 50: half right`, or a
-`regexp:` one stops it, since the blank's answer field has no place for
-either; that blank is added by hand. The points are shared among the blanks,
-*part marks per blank*, which is Brightspace's default for a short answer with
-several.
+left alone too, and named. **A blank of regular expressions** is set to that
+answer type first, through the button beside its answers (*Answer Type for
+Blank 3, Text Selected*), whose menu offers Text, Case-Sensitive Text and
+Regular Expression; every blank's type is set before any answer is typed,
+since a click on a type button while an answer field has the focus only takes
+the focus away, and the item is clicked where the menu draws it, since
+scrolling closes the menu. The readback compares every blank's answers and
+type. The points are shared among the blanks, *part marks per blank*, which is
+Brightspace's default for a short answer with several; and an answer's own
+weight does not survive the question having several blanks: every answer of a
+blank gets the blank's share (measured 2026-11-24, `1001010` imported at 50%
+read back at 33.3, as `01001010` beside it). So bs-yaml-quiz refuses part
+credit in a blank, and a blank of both kinds, before anything is made.
 
 **`shuffle`** sets each question's *Randomize answer order*, which the CSV
 cannot carry and D2L's import leaves off. It reads the same YAML, where an `MC`

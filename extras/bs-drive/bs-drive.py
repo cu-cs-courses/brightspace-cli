@@ -752,9 +752,19 @@ def yaml_quiz():
     return m
 
 
+# A blank's answer type, as the editor's button names it: "Answer Type for Blank 2,
+# Regular Expression Selected". Every answer of a blank is of its type, so a
+# blank is a regular expression only when all its answers are.
+BLANK_TYPES = r"""Object.fromEntries(findAll(e => e.tagName === 'BUTTON' && /Answer Type for Blank \d+, .* Selected/.test(e.innerText || ''))
+  .map(e => { const m = (e.innerText || '').match(/Answer Type for Blank (\d+), (.*) Selected/); return [m[1], m[2].trim()]; }))"""
+
+
 def wanted_blanks(path):
-    """[(title, [[answer, ...] per blank])] for every MSA question in a quiz file,
-    the answers as the CSV would write them."""
+    """[(title, [([answer, ...], type) per blank])] for every MSA question in a quiz
+    file, the answers as the CSV would write them and the type "Text" or "Regular
+    Expression". bs-yaml-quiz has refused what a blank cannot hold, part credit
+    and a blank of both kinds; the checks here stay for a file that reaches this
+    verb some other way."""
     yq = yaml_quiz()
     try:
         data = yq.load(pathlib.Path(path).read_text())
@@ -766,11 +776,11 @@ def wanted_blanks(path):
             blanks = []
             for i, (_, answers) in enumerate(yq.msa_blanks(q, where), 1):
                 rows = yq.answer_rows(answers, f"{where}, blank {i}")
-                odd = [r[2] for r in rows if r[1] != "100" or r[3]]
-                if odd:
-                    sys.exit(f"{where}, blank {i}: {odd} has a weight or regexp, which the blank's answer field "
-                             "has no place for; add that blank by hand")
-                blanks.append([r[2] for r in rows])
+                regexp = {bool(r[3]) for r in rows}
+                if [r for r in rows if r[1] != "100"] or len(regexp) > 1:
+                    sys.exit(f"{where}, blank {i}: part credit, or regular expressions beside plain answers, "
+                             "which a blank cannot hold")
+                blanks.append(([r[2] for r in rows], "Regular Expression" if regexp == {True} else "Text"))
             out.append((q.get("title"), blanks))
     except yq.Failed as e:
         sys.exit(str(e))
@@ -788,6 +798,25 @@ def open_question(ou, section, title):
     return b, p
 
 
+def set_type(b, p, k, kind):
+    """Blank k's answer type, through its button's menu: Text, Case-Sensitive Text
+    or Regular Expression. True once the button says so. The menu draws a moment
+    after the click, a new blank's later than the first's, so each step waits."""
+    item = (f"e => e.tagName === 'DIV' && e.children.length === 0 && (e.innerText || '').trim() === {json.dumps(kind)}"
+            " && e.getBoundingClientRect().width > 0")
+    p.click_pred(f"e => e.tagName === 'BUTTON' && /Answer Type for Blank {k},/.test(e.innerText || '')", settle=1,
+                 what=f"blank {k}'s answer type")
+    if not wait_for(p, f"findAll({item}).length", secs=10):
+        return False
+    # Clicked where it is: scrolling it into view first closes the menu, and the
+    # click then lands on nothing (2026-11-24, a third blank's menu low on the page).
+    r = p.js(f"(() => {{ const e = findAll({item})[0]; return e ? absOf(e) : null; }})()")
+    if not r:
+        return False
+    b.click_xy(r["x"], r["y"]); time.sleep(1)
+    return bool(wait_for(p, f"({BLANK_TYPES})[{json.dumps(str(k))}] === {json.dumps(kind)}", secs=10))
+
+
 def verb_blanks(a):
     ou = org_unit(a.course)
     want = wanted_blanks(a.file)
@@ -795,31 +824,41 @@ def verb_blanks(a):
         sys.exit(f"{a.file} has no MSA question")
     bad = False
     for title, blanks in want:
+        texts = [answers for answers, _ in blanks]
+        types = {str(k): kind for k, (_, kind) in enumerate(blanks, 1)}
         b, p = open_question(ou, a.section, title)
         try:
             have = [x["answers"] for x in p.js(BLANKS)]
+            have_types = p.js(BLANK_TYPES)
             print(f"{title}: {len(have)} of {len(blanks)} blanks now")
-            if have == blanks:
+            if have == texts and have_types == types:
                 print("  whole already; nothing to change"); continue
-            if len(have) != 1 or have[0] != blanks[0]:
-                print(f"  it holds {have}, not the first blank as imported, {blanks[0]}: left alone"); bad = True; continue
-            for k, answers in enumerate(blanks[1:], 2):
-                print(f"  would add blank {k}: {', '.join(answers)}")
+            if len(have) != 1 or have[0] != texts[0]:
+                print(f"  it holds {have}, not the first blank as imported, {texts[0]}: left alone"); bad = True; continue
+            for k, (answers, kind) in enumerate(blanks[1:], 2):
+                print(f"  would add blank {k}" + (" as a regular expression" if kind != "Text" else "")
+                      + f": {', '.join(answers)}")
             if not a.go:
                 print("  nothing written; add --go"); continue
             for k in range(2, len(blanks) + 1):      # every blank first: a click after typing lands on a moved button
                 p.click("d2l-button, button", "Add Blank", settle=3)
             if len(p.js(BLANKS)) != len(blanks):
                 sys.exit(f"Add Blank made {len(p.js(BLANKS))} blanks, not {len(blanks)}; nothing saved")
-            for k, answers in enumerate(blanks[1:], 2):
+            # Every blank's type before any answer: once a blank's answer field has the
+            # focus, the next click on a type button only takes it away, and the menu
+            # never opens (2026-11-24, blank 3 after blank 2's answers).
+            for k, (answers, kind) in enumerate(blanks, 1):
+                if p.js(BLANK_TYPES).get(str(k)) != kind and not set_type(b, p, k, kind):
+                    sys.exit(f"  blank {k}'s answer type did not become {kind}; nothing saved")
+            for k, (answers, kind) in enumerate(blanks[1:], 2):
                 r = p.js(f"""(() => {{ const e = findAll(e => e.tagName === 'INPUT' && /Answers for blank {k} of/.test(labelOf(e)))[0];
                              e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()""")
                 b.click_xy(r["x"], r["y"])
                 for ans in answers:
                     b.insert(ans); b.key("Enter")
             typed = [x["answers"] for x in p.js(BLANKS)]
-            if typed != blanks:
-                sys.exit(f"  the fields read {typed} before saving, not {blanks}; nothing saved")
+            if typed != texts:
+                sys.exit(f"  the fields read {typed} before saving, not {texts}; nothing saved")
             # A mouse click on Save sends nothing here; Enter on the focused button submits the form.
             p.js("findAll(e => e.tagName === 'BUTTON' && visible(e) && textOf(e) === 'Save')[0].focus()")
             b.key("Enter"); time.sleep(8)
@@ -828,11 +867,13 @@ def verb_blanks(a):
         b, p = open_question(ou, a.section, title)
         try:
             got = [x["answers"] for x in p.js(BLANKS)]
+            got_types = p.js(BLANK_TYPES)
         finally:
             b.close()
-        ok = got == blanks
+        ok = got == texts and got_types == types
         bad |= not ok
-        print(f"  checked on the server: {len(got)} blanks, " + ("as the file has them" if ok else f"DIFFERENT: {got}"))
+        print(f"  checked on the server: {len(got)} blanks, " + ("as the file has them" if ok else
+              f"DIFFERENT: {got}, types {got_types}"))
     if bad:
         sys.exit(1)
 

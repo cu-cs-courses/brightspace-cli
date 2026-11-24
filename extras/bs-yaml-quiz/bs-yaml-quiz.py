@@ -447,6 +447,19 @@ def msa_blanks(q, where):
         answers = spliced(b["answers"])
         if not isinstance(answers, list) or not answers:
             raise Failed(f"{where}: blank {i} needs answers, every spelling that counts")
+        # What a question of several blanks can hold, measured 2026-11-24: every
+        # answer of a blank gets the blank's share of the points, whatever weight it
+        # came in with, so part credit for one spelling would count in full; and a
+        # blank has one answer type, Text or Regular Expression, for all its answers.
+        rows = answer_rows(answers, f"{where}, blank {i}")
+        partial = [r[2] for r in rows if r[1] != "100"]
+        if partial:
+            raise Failed(f"{where}: blank {i}'s {', '.join(map(repr, partial))} gives part credit, which a blank "
+                         "cannot: Brightspace gives every answer of a blank the blank's share of the points, so it "
+                         "would count in full. Give it full marks, or leave it out")
+        if len({r[3] for r in rows}) > 1:
+            raise Failed(f"{where}: blank {i} has regular expressions and plain answers both; a blank's answers "
+                         "are all one or the other, its answer type, so write them all as regular expressions")
         out.append((inline(prompt.strip()), answers))
     return out
 
