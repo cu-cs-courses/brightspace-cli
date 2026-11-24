@@ -3649,7 +3649,7 @@ def drive_unready(s, by_hand=False):
     so a test double, a machine without a browser, or --by-hand leaves them
     printed for a person instead."""
     if by_hand or os.environ.get("BRIGHTSPACE_BY_HAND"):
-        return "--by-hand" if by_hand else "BRIGHTSPACE_BY_HAND is set, as the web page sets it"
+        return "--by-hand" if by_hand else "BRIGHTSPACE_BY_HAND is set"
     if urllib.parse.urlsplit(s.base).scheme != "https":
         return "the host is not https, so not Brightspace's web page"
     if not DRIVE.exists():

@@ -11,7 +11,7 @@ cases are skipped and say so.
 The JSON here is the shape the Valence docs give for each route, cut down to
 the fields the tool reads; the mock is the record of what was assumed.
 """
-import base64, datetime as dt, hashlib, json, os, pathlib, random, re, subprocess, sys, tempfile, threading
+import base64, datetime as dt, hashlib, json, os, pathlib, random, re, subprocess, sys, tempfile, threading, time
 import urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1041,13 +1041,37 @@ if COOKIES_OK:
         return proc, int(re.search(r"127\.0\.0\.1:(\d+)", first).group(1)), first
 
     def fetch(port, host, path="/", form=None, headers=None):
+        """A page; a button that starts a job lands on the job's page, which is
+        read again until the job has ended and the page stops refreshing itself."""
         data = urllib.parse.urlencode(form, doseq=True).encode() if form is not None else None
         req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, headers={"Host": host, **(headers or {})})
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
-                return r.status, r.read().decode()
+                status, body, url = r.status, r.read().decode(), r.geturl()
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
+        for _ in range(240):
+            if "/job?id=" not in url or 'http-equiv="refresh"' not in body:
+                break
+            time.sleep(0.25)
+            again = urllib.request.Request(url, headers={"Host": host, **(headers or {})})
+            with urllib.request.urlopen(again, timeout=60) as r:
+                status, body = r.status, r.read().decode()
+        return status, body
+
+    class Stay(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **kw):
+            return None
+
+    def job_of(port, host, path, form, headers=None):
+        """Where a button that starts a job sends the browser, without going there."""
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=urllib.parse.urlencode(form).encode(),
+                                     headers={"Host": host, **(headers or {})})
+        try:
+            urllib.request.build_opener(Stay).open(req, timeout=60)
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Location") or ""
+        return 200, ""
 
     def web_check(label, got, code, has=(), lacks=()):
         global fails
@@ -1559,9 +1583,12 @@ if COOKIES_OK:
                   has=["Not run", "is not one of your courses"])
         got = fetch(wport, here, "/make", {"token": token, "course": "grp", "route": "shell", "shell": "shell",
                                            "name": "Quiz 18", "date": "2026-10-28", "grade_item": "", "action": "go"})
-        web_check("web: Make it in the shell makes it there, and readies step 2", got, 200,
+        web_check("web: Make it in the shell makes it there, on the job's page, which links to step 2", got, 200,
                   has=["Made", "--course grp --shell shell --name=&#x27;Quiz 18&#x27;", "created quiz &#x27;Quiz 18&#x27;",
-                       "step 2 below copies it", '<input type="checkbox" name="to" value="240" checked>',
+                       'href="/quizzes?as=you&amp;copy=grp&amp;shell=shell#copy-it">step 2</a>'])
+        web_check("web: step 2, from that link, ready: the sections ticked, the item, the shell emptied after",
+                  fetch(wport, here, "/quizzes?as=you&copy=grp&shell=shell"), 200,
+                  has=['<input type="checkbox" name="to" value="240" checked>',
                        'name="item_like" value="previous"', '<input type="checkbox" name="clear" checked>'])
         web_check("web: step 2 copies it into the sections and empties the shell",
                   fetch(wport, here, "/copy-quiz", {"token": token, "shell": "shell", "to": "240",
@@ -1642,6 +1669,23 @@ if COOKIES_OK:
                   fetch(wport, "bs.example.test", "/defaults",
                         {"token": token, "as": "other", "dcourse": "240", "d_minutes": "9"},
                         {**asks(), "Origin": "https://bs.example.test"}), 200, has=["Saved", "--set=minutes=9"])
+        # Making a quiz, or comparing it, runs as a job, on a page of its own: its starter's
+        # alone, though another person may act as the same session.
+        hdr = {**asks(), "Origin": "https://bs.example.test"}
+        code, where = job_of(wport, "bs.example.test", "/make",
+                             {"token": token, "as": "other", "course": "240", "name": "Quiz 13", "action": "check"}, hdr)
+        print(("ok  " if code == 303 and where.startswith("/job?id=") else "FAIL"),
+              f"web behind Access: Compare starts a job and sends the browser to its page ({code} {where[:9]})")
+        fails += not (code == 303 and where.startswith("/job?id="))
+        web_check("web behind Access: the job's page, for whoever started it, once it has ended",
+                  fetch(wport, "bs.example.test", where, headers=asks()), 200,
+                  has=["brightspace.py setup-quiz --course 240 --name=&#x27;Quiz 13&#x27; --check", "Back to Quizzes"],
+                  lacks=['http-equiv="refresh"'])
+        web_check("web behind Access: someone else's job is not theirs to see, though the session is theirs too",
+                  fetch(wport, "bs.example.test", where, headers=asks(dict(good, email="bob@example.edu"))), 404,
+                  has=["No job of yours"])
+        web_check("web behind Access: a job id nobody was given",
+                  fetch(wport, "bs.example.test", "/job?id=nope", headers=asks()), 404, has=["No job of yours"])
         own = webini.parent / "quiz-defaults-other.yml"
         good_file = own.exists() and "minutes: 9" in own.read_text() and "minutes: 9" not in DEFAULTS.read_text()
         fails += not good_file; print("   it went to quiz-defaults-other.yml beside web.ini, and nowhere else:", good_file)

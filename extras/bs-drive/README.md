@@ -140,9 +140,10 @@ plan. Run by hand, they are:
     bs-drive.py lockdown 120 'Quiz 9' --domains 'cu-cs-courses.site, docs.oracle.com' --go
 
 `setup-quiz --check` reads LockDown back through `lockdown --json`, and each
-question's shuffle through the API. The web page
-sets `BRIGHTSPACE_BY_HAND`, since five minutes is longer than a request
-should wait.
+question's shuffle through the API. The web page runs both as jobs, since
+five minutes is longer than a request should wait: the button sends the
+browser to the job's page, which shows each step as it goes (until
+2026-11-24 it set `BRIGHTSPACE_BY_HAND` and left them printed).
 
 Proved on 2026-11-19 in the 120 Devshell with 115's Quiz 12 in-class YAML,
 seven questions of which two have two blanks: the quiz-questions API read back

@@ -461,7 +461,8 @@ every step the API has no route for through
 and Python has `websocket-client`: the questions in, the blanks, the options
 shuffled, Add Existing,
 LockDown and its sites, then the quiz shown. `--by-hand`, or
-`BRIGHTSPACE_BY_HAND` set, prints them instead. Respondus renames a quiz it
+`BRIGHTSPACE_BY_HAND` set, prints them instead. The web page takes the same
+steps, as a job it shows running (below). Respondus renames a quiz it
 guards, *Quiz 9- Requires Respondus LockDown Browser*, and `setup-quiz` and
 `--check` find it under either name.
 
@@ -750,9 +751,17 @@ the name is refused, as the command refuses it.
    course's default, shown greyed in it. A quiz's YAML file can be chosen or
    pasted instead; it is run in a directory of its own beside the CSV made from
    it, as bs-yaml-quiz would leave it, with `--msa-as-sa`, and the page offers
-   that CSV for the Question Library's import.
+   that CSV to download. **Make it and Compare run as jobs**, since 2026-11-24:
+   `setup-quiz --go` takes minutes when [bs-drive](extras/bs-drive/README.md)
+   puts the questions in, the blanks, the shuffled options, LockDown and the
+   visibility, and `--check` reads LockDown back the same way. The button
+   sends the browser to the job's own page, which shows what it has printed so
+   far and refreshes itself until it ends; it is its starter's alone, one job
+   runs at a time for a session, and closing the page stops nothing. The
+   machine it runs on needs `chromium` on `PATH` and `websocket-client`, or
+   setup-quiz prints those steps for a person, as it does in a terminal.
 2. **Copy it into the sections**, `copy-quiz`: once the questions are in the
-   shell. Making a quiz in a shell fills this in for it.
+   shell. Making a quiz in a shell ends with a link to this, filled in.
 3. **Course defaults**, `quiz-defaults`: each course's, and a form that saves
    one course's, with `--set` for what changed and `--unset` for what was
    emptied.

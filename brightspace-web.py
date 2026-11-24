@@ -8,12 +8,17 @@ Two tabs, under a header that says whose session it acts as:
     Quizzes       making a quiz, in its course or in a shell to copy into
                   several sections, copying it, and each course's quiz defaults
 
+Each button runs the command the page shows, and prints what it printed.
+Making a quiz and comparing it with Brightspace run as jobs, each on a page of
+its own that shows what it has printed so far until it ends: from its file a
+quiz goes in whole, bs-drive driving a headless Chromium on its pages for what
+the API cannot do, which takes minutes.
+
     ./brightspace-web.py                          on your own machine, as you
     ./brightspace-web.py --access web.ini         behind Cloudflare Access, as whoever signed in
 
-Each button runs the command the page shows, and prints what it printed. The
-page is a way to fill in a command and not a second copy of one, so it checks
-and refuses exactly what the command does.
+The page is a way to fill in a command and not a second copy of one, so it
+checks and refuses exactly what the command does.
 
 **On your own machine** it acts as you: the session `brightspace.py session`
 took, your courses file and your quiz defaults. It opens itself in your
@@ -60,6 +65,7 @@ import os
 import pathlib
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -554,7 +560,11 @@ def quiz_part(profile, rows, form, slots, edit, copy, fresh):
                "<fieldset><legend>The quiz file</legend>"
                "<p class=\"hint\">A quiz written for bs-yaml-quiz, whose <code>brightspace:</code> block says "
                "which course it goes in and when it runs, in the keys above. Choose its file, or paste it. "
-               "Its questions go in afterwards, from the CSV this hands back.</p>"
+               "<b>Make it</b> does the whole quiz, as <code>setup-quiz --go</code> does: the quiz and its grade "
+               "item, then in a browser on the quiz's pages the questions, the blanks of each MSA question, the "
+               "shuffled options, LockDown Browser and its sites, and, with <code>visible: true</code>, the "
+               "switch. That takes a few minutes, so it runs on a page of its own, which shows each step as it "
+               "goes; <b>Compare</b> runs there too, since it reads LockDown back the same way.</p>"
                '<input type="file" accept=".yml,.yaml" id="pick">'
                f'<textarea name="yaml" rows="12" spellcheck="false">{esc(form.get("yaml", ""))}</textarea>'
                "</fieldset>"
@@ -589,8 +599,8 @@ def quiz_part(profile, rows, form, slots, edit, copy, fresh):
 
     # 3. Course defaults: quiz-defaults.
     out.append('<h2 class="part" id="defaults-of">3. Course defaults</h2>'
-               "<p class=\"hint\">One block per course: what a quiz leaves empty. They cover what the API can set; "
-               "submission views and the questions stay a step by hand, and making a quiz says so.</p>")
+               "<p class=\"hint\">One block per course: what a quiz leaves empty. Submission views stay a step "
+               "by hand, and the questions too for a quiz made without its file; making a quiz says so.</p>")
     if problem:
         out.append(f'<p class="bad">{esc(problem)}</p>')
     if defaults:
@@ -770,22 +780,137 @@ def run_checklist(form, profile):
     return command(argv, profile)
 
 
-def command(argv, profile, cwd=None):
-    """brightspace.py with these arguments, as the session: (the command line, exit status, output)."""
+def session_env(profile):
+    """The environment brightspace.py runs in, as the session."""
     env = dict(os.environ)
     for var, key in (("BRIGHTSPACE_SESSION", "session"), ("BRIGHTSPACE_COURSES", "courses"),
                      ("BRIGHTSPACE_QUIZ_DEFAULTS", "defaults")):
         if profile[key]:
             env[var] = str(profile[key])
-    # The steps bs-drive takes in a browser run for minutes, longer than a request
-    # should wait, so the page leaves them printed for the person who asked.
-    env["BRIGHTSPACE_BY_HAND"] = "1"
+    return env
+
+
+def command(argv, profile, cwd=None):
+    """brightspace.py with these arguments, as the session: (the command line, exit status, output).
+    For what takes seconds; making a quiz and comparing it run as a Job."""
     r = subprocess.run([sys.executable, str(HERE / "brightspace.py"), *argv],
-                       capture_output=True, text=True, timeout=1800, env=env, cwd=cwd)
+                       capture_output=True, text=True, timeout=1800, env=session_env(profile), cwd=cwd)
     return "brightspace.py " + " ".join(map(shell_word, argv)), r.returncode, (r.stdout + r.stderr).strip()
 
 
-def run_make(form, profile):
+# Making a quiz from its file and comparing it with Brightspace run bs-drive, a
+# headless Chromium on the quiz's pages, for what the API cannot do: the questions,
+# the blanks, the shuffled options, Add Existing, LockDown, the visibility. That
+# takes minutes, longer than a request should wait, so it runs as a job: the button
+# starts it and sends the browser to the job's own page, which shows what it has
+# printed so far and refreshes itself until it ends. Until 2026-11-24 the page set
+# BRIGHTSPACE_BY_HAND and left those steps printed for a person to do.
+JOBS, JOBS_LOCK = {}, threading.Lock()
+JOB_LIMIT, JOB_KEPT = 1800, 6 * 3600     # how long one may run; how long a finished one stays readable
+
+
+class Job:
+    """One brightspace.py run in the background, its output gathered as it comes."""
+
+    def __init__(self, owner, profile, argv, cwd=None, tmp=None, csv=None, form=None, shell=None):
+        self.id = secrets.token_urlsafe(18)
+        self.owner, self.profile = owner, profile["name"]
+        self.line = "brightspace.py " + " ".join(map(shell_word, argv))
+        self.action = (form or {}).get("action")
+        self.csv, self.tmp, self.shell = csv, tmp, shell     # shell: (the course, the shell) made in
+        self.out, self.code, self.started, self.ended = [], None, time.time(), None
+        self.proc = subprocess.Popen([sys.executable, "-u", str(HERE / "brightspace.py"), *argv], cwd=cwd,
+                                     env=dict(session_env(profile), PYTHONUNBUFFERED="1"), text=True,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        self.timer = threading.Timer(JOB_LIMIT, self.proc.kill)
+        self.timer.start()
+        threading.Thread(target=self.gather, daemon=True).start()
+
+    def gather(self):
+        for line in self.proc.stdout:
+            with JOBS_LOCK:
+                self.out.append(line)
+        code = self.proc.wait()
+        self.timer.cancel()
+        if self.tmp:
+            shutil.rmtree(self.tmp, ignore_errors=True)
+        with JOBS_LOCK:
+            self.code, self.ended = code, time.time()
+
+    def output(self):
+        with JOBS_LOCK:
+            return "".join(self.out).strip()
+
+    @staticmethod
+    def start(owner, profile, argv, **kw):
+        """A new job, or ValueError when the session already has one running: two
+        at once would drive the same quiz pages, as the same person, in two browsers."""
+        with JOBS_LOCK:
+            now = time.time()
+            for k in [k for k, j in JOBS.items() if j.ended and now - j.ended > JOB_KEPT]:
+                del JOBS[k]
+            busy = next((j for j in JOBS.values() if j.profile == profile["name"] and j.code is None), None)
+        if busy:
+            raise ValueError(f"{busy.line} is still running as this session, started "
+                             f"{time.strftime('%H:%M', time.localtime(busy.started))}: its page is /job?id={busy.id}")
+        job = Job(owner, profile, argv, **kw)
+        with JOBS_LOCK:
+            JOBS[job.id] = job
+        return job
+
+
+def step_two(profile, course, shell):
+    """Step 2's form, ready once a quiz is made in a shell: the shell, the course's
+    sections, the grade item each copy is shaped like, the shell emptied after."""
+    keys = defaults_of(profile)[0].get(course, {})
+    return {"shell": shell, "to": B.section_labels(keys.get("sections")) or [course],
+            "item_like": keys.get("item_like", "previous"), "clear": True}
+
+
+def job_page(job):
+    """The job's own page: what it has printed, refreshing itself until it ends."""
+    esc = html.escape
+    out = job.output()
+    took = int((job.ended or time.time()) - job.started)
+    clock = f"{took // 60}:{took % 60:02d}"
+    back = f'/quizzes?as={urllib.parse.quote(job.profile)}#make-it'
+    if job.code is None:
+        head = '<meta http-equiv="refresh" content="3">'
+        body = (f'<section class="result"><h2>Running, {clock} so far</h2><p><code>{esc(job.line)}</code></p>'
+                "<p class=\"hint\">This page shows what it has printed and refreshes itself every few seconds "
+                "until it ends. The steps in a browser take a few minutes; closing this page does not stop "
+                "them.</p>" f"<pre>{esc(out)}</pre></section>")
+    else:
+        code = job.code
+        if code < 0:
+            verdict, good = f"Stopped after {clock}: it ran longer than {JOB_LIMIT // 60} minutes", False
+        elif code:
+            verdict, good = ("Not what the plan says, or not compared: below is why" if job.action == "check"
+                             else "Stopped"), False
+        else:
+            verdict, good = {"go": "Made", "check": "Brightspace has what the plan says"}.get(
+                job.action, "Checked: nothing sent"), True
+        extra = ""
+        if job.shell and not code and job.action == "go":
+            # Step 1 done: step 2 is ready, once the questions are in the shell.
+            q = urllib.parse.urlencode({"as": job.profile, "copy": job.shell[0], "shell": job.shell[1]})
+            extra += (f'<p>Next, in the shell, its questions; then <a href="/quizzes?{esc(q)}#copy-it">step 2</a> '
+                      "copies it into the sections, ready as it is.</p>")
+        if job.csv and not code:
+            data = base64.b64encode(job.csv[1].encode("utf-8")).decode()
+            extra = (f'<p><a download="{esc(job.csv[0])}" href="data:text/csv;charset=utf-8;base64,{data}">'
+                     f"Download {esc(job.csv[0])}</a>, the questions as they went into the Question Library, "
+                     "made from the file.</p>")
+        head = ""
+        body = result(f"{verdict} ({clock})", good, job.line, out, extra)
+    return "\n".join(["<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">",
+                      '<meta name="viewport" content="width=device-width, initial-scale=1">', head,
+                      f"<title>Brightspace: {esc(job.line[15:60])}</title>", STYLE, "</head><body><main>",
+                      f'<p><a href="{back}">Back to Quizzes</a>, acting as {esc(job.profile)}</p>', body,
+                      "</main></body></html>"])
+
+
+def run_make(form, profile, owner=None):
     """setup-quiz for the make form: the course and the route, and every field
     filled in as a flag; an empty one is the course's default."""
     labels = labels_of(profile)
@@ -806,6 +931,9 @@ def run_make(form, profile):
             argv.append(f"--{key}={value if key == 'description' else value.strip()}")
     argv += {"yes": ["--grade-item"], "no": ["--no-grade-item"]}.get(form.get("grade_item"), [])
     argv += {"go": ["--go"], "check": ["--check"]}.get(form.get("action"), [])
+    if form.get("action") in ("go", "check"):
+        return Job.start(owner, profile, argv, form=form,
+                         shell=(course, form["shell"]) if form.get("route") == "shell" else None)
     return command(argv, profile)
 
 
@@ -860,11 +988,12 @@ def run_defaults(form, profile):
     return command(argv, profile)
 
 
-def run_setup(form, profile):
+def run_setup(form, profile, owner=None):
     """setup-quiz for a quiz file sent from the page, run as the session, in a
     directory of its own that holds the file and the CSV made from it, as
     bs-yaml-quiz.py would leave them: (the command line, exit status, output,
-    (the CSV's name, its text) or None)."""
+    (the CSV's name, its text) or None); or, to make the quiz or compare it,
+    the Job doing so, which removes the directory when it ends."""
     text = form.get("yaml", "").replace("\r\n", "\n")
     if not text.strip():
         raise ValueError("choose the quiz's file, or paste it into the box")
@@ -873,18 +1002,27 @@ def run_setup(form, profile):
         name = "quiz.yml"
     argv = ["setup-quiz", name, *{"go": ["--go"], "check": ["--check"]}.get(form.get("action"), [])]
     csv = None
-    with tempfile.TemporaryDirectory(prefix="setup-quiz-") as tmp:
-        src = pathlib.Path(tmp) / name
-        src.write_text(text, encoding="utf-8")
+    tmp = tempfile.mkdtemp(prefix="setup-quiz-")
+    src = pathlib.Path(tmp) / name
+    src.write_text(text, encoding="utf-8")
+    try:
+        fmt = B.quiz_format()
+        # As bs-yaml-quiz.py --msa-as-sa would leave it, the blanks of an MSA question
+        # after its first being bs-drive's to add.
+        csv = (src.with_suffix(".csv").name, fmt.to_csv(fmt.load(text), name, msa_as_sa=True))
+        src.with_suffix(".csv").write_bytes(csv[1].encode("utf-8"))
+    except Exception:
+        csv = None      # whatever stops the CSV, setup-quiz reports it in its own words
+    if form.get("action") in ("go", "check"):
         try:
-            fmt = B.quiz_format()
-            # As bs-yaml-quiz.py --msa-as-sa would leave it: setup-quiz then lists an
-            # MSA question's other blanks among its steps by hand.
-            csv = (src.with_suffix(".csv").name, fmt.to_csv(fmt.load(text), name, msa_as_sa=True))
-            src.with_suffix(".csv").write_bytes(csv[1].encode("utf-8"))
-        except Exception:
-            csv = None      # whatever stops the CSV, setup-quiz reports it in its own words
+            return Job.start(owner, profile, argv, cwd=tmp, tmp=tmp, csv=csv, form=form)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+    try:
         line, code, output = command(argv, profile, cwd=tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     return line, code, output, csv
 
 
@@ -937,8 +1075,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("Origin") not in (None, *origins):
             raise Refused("that form came from another site")
         if not self.access:
+            self.email = "you"
             return [YOU]
-        return self.access.who(self.headers)[1]
+        self.email, sessions = self.access.who(self.headers)
+        return sessions
 
     def do_GET(self):
         try:
@@ -946,12 +1086,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (Refused, OSError, ValueError, B.Failed) as e:
             return self.reply(403, REFUSED.format(why=html.escape(str(e))))
         u = urllib.parse.urlsplit(self.path)
+        if u.path == "/job":
+            # A job is its starter's: one of theirs, by an id nobody else was shown.
+            job = JOBS.get(urllib.parse.parse_qs(u.query).get("id", [""])[0])
+            if not job or job.owner != self.email or job.profile not in [p["name"] for p in profiles]:
+                return self.reply(404, REFUSED.format(why="No job of yours is at that address; it may have "
+                                                          "ended more than six hours ago."))
+            return self.reply(200, job_page(job))
         tab = next((t for t, path, _ in TABS if path == u.path), None)
         if not tab:
             return self.reply(404, REFUSED.format(why="Nothing is at that address."))
         q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
         profile = next((p for p in profiles if p["name"] == q.get("as")), profiles[0])
-        self.reply(200, page(profiles, profile, tab, {"course": q.get("course", "")}, edit=q.get("edit")))
+        # A finished job's link to step 2: the shell it made the quiz in, and the course.
+        copy = step_two(profile, q["copy"], q["shell"]) if q.get("copy") and q.get("shell") else None
+        self.reply(200, page(profiles, profile, tab, {"course": q.get("course", "")}, edit=q.get("edit"), copy=copy))
 
     def do_POST(self):
         try:
@@ -979,10 +1128,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if where == "/checklist":
                 line, code, output = run_checklist(form, profile)
-            elif where == "/make":
-                line, code, output = run_make(form, profile)
-            elif where == "/setup-quiz":
-                line, code, output, csv = run_setup(form, profile)
+            elif where in ("/make", "/setup-quiz"):
+                ran = (run_make if where == "/make" else run_setup)(form, profile, owner=self.email)
+                if isinstance(ran, Job):
+                    self.send_response(303)
+                    self.send_header("Location", f"/job?id={ran.id}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if where == "/make":
+                    line, code, output = ran
+                else:
+                    line, code, output, csv = ran
             elif where == "/copy-quiz":
                 line, code, output = run_copy(form, profile)
                 form["from"] = form.get("shell", "")
@@ -1019,9 +1176,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                      "Import, made from the file.</p>")
         if where == "/make" and form.get("route") == "shell" and action == "go" and not code:
             # Step 1 done: step 2 is ready, once the questions are in the shell.
-            keys = defaults_of(profile)[0].get(form.get("course", ""), {})
-            copy = {"shell": form.get("shell"), "to": B.section_labels(keys.get("sections")) or [form.get("course")],
-                    "item_like": keys.get("item_like", "previous"), "clear": True}
+            copy = step_two(profile, form.get("course", ""), form.get("shell"))
             extra += ("<p>Next, in the shell, its questions; then step 2 below copies it into the sections, "
                       "ready as it is.</p>")
         self.reply(200, page(profiles, profile, tab, form, {slot: result(verdict, code == 0, line, output, extra)},
