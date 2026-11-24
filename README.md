@@ -363,6 +363,7 @@ can be checked the morning of the exam in one command rather than five tabs.
     ./brightspace.py new-category 240 Midterm --weight 35
     ./brightspace.py set-item 240 Midterm --name 'Midterm Part 1' --category Midterm
     ./brightspace.py set-item 240 'Quiz 5' --points 9
+    ./brightspace.py set-item 120 Attendance --points 5 --clip   # lower: Brightspace caps marks, never rescales
     ./brightspace.py new-quiz 240 'Midterm Part 1' --start '2026-09-29 12:30' \
         --end '2026-09-29 13:25' --minutes 50 --attempts 1 \
         --ip 148.137.150.0-148.137.150.255
@@ -492,6 +493,13 @@ each overrides only the fields you pass. `new-quiz` forces nothing it was not
 told: shuffle and auto-publish come from the quiz it copies. `set-item`,
 `set-quiz` and `set-folder` read the object, change the named fields and send
 the rest back untouched, because the update route replaces the whole object.
+
+**Lowering what an item is out of does not rescale its marks.** Brightspace
+caps every mark above the new maximum at it: an Attendance item taken from 25
+to 5 turned a 15 and a 20 into 5 of 5 each. So `set-item --points` with a
+lower number reads the marks first and refuses while any is above it; with
+`--clip` it goes ahead, and the marks are then set again with `grade` on the
+new scale.
 
 **But a copy is taken in the read shape, and a few fields differ on the way
 in.** Rich text is `{"Content", "Type"}` going in and `{"Text", "Html"}` coming

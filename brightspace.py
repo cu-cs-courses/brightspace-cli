@@ -1847,6 +1847,25 @@ def cmd_set_item(args):
         changed["AssociatedTool"] = {"ToolId": DROPBOX_TOOL, "ToolItemId": folder["Id"]}
     if not changed:
         raise Failed("nothing to change: pass --name, --category, --weight, --points or --folder")
+    new_max = changed.get("MaxPoints")
+    if new_max is not None and full.get("MaxPoints") and new_max < full["MaxPoints"]:
+        # Brightspace does not rescale the marks when an item's maximum goes
+        # down: it caps each one above the new maximum at it. 120's Attendance,
+        # 25 to 5 on 2026-11-24, turned a 15 and a 20 into 5 of 5 each.
+        over = []
+        for u in s.api(f"/d2l/api/le/{le}/{ou}/classlist/"):
+            try:
+                v = s.api(f"/d2l/api/le/{le}/{ou}/grades/{item['Id']}/values/{u['Identifier']}")
+            except Exception:
+                continue
+            got = (v or {}).get("PointsNumerator")
+            if got is not None and got > new_max:
+                over.append(f"{u.get('DisplayName')} {got:g}")
+        if over and not getattr(args, "clip", False):
+            raise Failed(f"{full['Name']!r} out of {full['MaxPoints']:g} to {new_max:g}: Brightspace caps "
+                         f"every mark above {new_max:g} at {new_max:g} rather than rescaling it, and "
+                         f"{len(over)} are above it: {', '.join(over)}. Pass --clip to go ahead, then "
+                         f"set those marks again with `grade` on the new scale")
     payload = item_payload(full, changed)
     if folder:
         payload["AssociatedTool"] = changed["AssociatedTool"]
@@ -4519,6 +4538,8 @@ def main(argv=None):
     x.add_argument("--weight")
     x.add_argument("--points", help="what it is out of: a quiz that grows a question grows its column")
     x.add_argument("--folder", help="attach it to this assignment folder, by name or id, from the item's side")
+    x.add_argument("--clip", action="store_true",
+                   help="with a lower --points: go ahead though marks are above it; Brightspace caps them, not rescales")
     x.add_argument("--dry-run", action="store_true", dest="dry_run", help="print the payload and stop")
     x = with_course("new-quiz", cmd_new_quiz, help="create a quiz; its question is added by hand after")
     x.add_argument("name")
