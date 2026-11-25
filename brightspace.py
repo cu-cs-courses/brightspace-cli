@@ -3227,7 +3227,7 @@ def cmd_setup(args):
 # A quiz's keys: its brightspace: block, and setup-quiz's flags of the same names.
 QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
              "points", "grade_item", "description", "shell", "calendar", "special_access_only",
-             "lockdown", "lockdown_domains", "visible")
+             "lockdown", "lockdown_domains", "monitor", "second_camera", "visible")
 # Respondus appends this to the name of a quiz it guards, so a quiz set up with
 # lockdown: true is found by either name afterwards.
 LOCKDOWN_SUFFIX = "- Requires Respondus LockDown Browser"
@@ -3287,7 +3287,8 @@ def check_value(key, value, at):
     if key in ("minutes", "attempts") and not re.fullmatch(r"[1-9]\d*", value):
         raise Failed(f"{at} {key}: is a whole number, not {value!r}"
                      + (" -- or none, for a quiz with no time limit" if key == "minutes" else ""))
-    if key in ("calendar", "special_access_only", "lockdown", "visible") and value.strip().lower() not in TRUTH | FALSITY:
+    if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "visible") \
+            and value.strip().lower() not in TRUTH | FALSITY:
         raise Failed(f"{at} {key}: is true or false, not {value!r}")
     if key == "lockdown_domains":
         hosts = domain_list(value)
@@ -3314,9 +3315,14 @@ def domain_list(value):
     return [x for x in re.split(r"[,\s]+", value or "") if x]
 
 
+# Respondus's suffix in either of its forms: "- Requires Respondus LockDown Browser",
+# and with Monitor " - Requires Respondus LockDown Browser + Webcam" (2026-11-24).
+RESPONDUS_SUFFIX = re.compile(r"\s*-\s*Requires Respondus LockDown Browser(\s*\+\s*Webcam)?\s*$")
+
+
 def quiz_named(have, want):
-    """A quiz's name is the one asked for, or that with Respondus's suffix."""
-    return same_name(have, want) or same_name(have, want + LOCKDOWN_SUFFIX)
+    """A quiz's name is the one asked for, or that with Respondus's suffix in either form."""
+    return same_name(have, want) or same_name(RESPONDUS_SUFFIX.sub("", have or ""), RESPONDUS_SUFFIX.sub("", want or ""))
 
 
 def section_labels(value):
@@ -3432,7 +3438,7 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         plan["item"] = True
     plan["used"] = used
     for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only",
-                "lockdown", "lockdown_domains", "visible"):
+                "lockdown", "lockdown_domains", "monitor", "second_camera", "visible"):
         if key in plan:
             check_value(key, plan[key], at)
     if "lockdown_domains" in plan:
@@ -3440,6 +3446,17 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
             raise Failed(f"{at} lockdown_domains: are the sites LockDown Browser lets a student open, "
                          "and lockdown: false turns LockDown Browser off")
         plan["lockdown_domains"] = ", ".join(domain_list(plan["lockdown_domains"]))
+        plan.setdefault("lockdown", "true")
+    # Respondus Monitor, the webcam, runs inside LockDown Browser, and a second camera
+    # is Monitor's: each asks for the one before it, and refuses its being turned off.
+    if "second_camera" in plan and as_flag(plan["second_camera"]):
+        if "monitor" in plan and not as_flag(plan["monitor"]):
+            raise Failed(f"{at} second_camera: is Respondus Monitor's, and monitor: false turns Monitor off")
+        plan.setdefault("monitor", "true")
+    if "monitor" in plan and as_flag(plan["monitor"]):
+        if "lockdown" in plan and not as_flag(plan["lockdown"]):
+            raise Failed(f"{at} monitor: Respondus Monitor runs inside LockDown Browser, "
+                         "and lockdown: false turns LockDown Browser off")
         plan.setdefault("lockdown", "true")
     day = plan.get("date")
     for key in ("start", "end"):
@@ -3521,6 +3538,10 @@ def quiz_summary(plan, template=None):
         extras.append(("LockDown Browser required, " + (f"{n} site{'s' if n != 1 else ''} allowed" if n
                                                         else "no other site allowed"))
                       if as_flag(plan["lockdown"]) else "LockDown Browser not required")
+    if "monitor" in plan:
+        extras.append(("Respondus Monitor required" + (", with a second camera" if as_flag(plan.get("second_camera"))
+                                                       else ""))
+                      if as_flag(plan["monitor"]) else "Respondus Monitor not required")
     if "visible" in plan:
         extras.append("made visible once its questions are in" if as_flag(plan["visible"]) else "left hidden")
     if extras:
@@ -3556,7 +3577,14 @@ def quiz_remainder(plan, template, shown, done=()):
         steps = [f"Its questions: {plan['name']} -> Add/Edit Questions, written there or imported\n"
                  "    into the Question Library and added with Add Existing."]
     if "lockdown" in plan and "lockdown" not in done:
-        steps.append(("LockDown Browser tab -> the quiz's row -> Settings -> Require LockDown Browser"
+        monitor = ""
+        if "monitor" in plan:
+            monitor = ("; Require Respondus Monitor" + ("; Monitor's Second Camera -> Require students use a second "
+                                                       "camera" if as_flag(plan.get("second_camera")) else
+                                                       "; Monitor's Second Camera -> not required"
+                                                       if "second_camera" in plan else "")
+                       if as_flag(plan["monitor"]) else "; Don't require Respondus Monitor")
+        steps.append(("LockDown Browser tab -> the quiz's row -> Settings -> Require LockDown Browser" + monitor
                       + (f"; Advanced Settings -> allow access to external domains, one line with commas:\n"
                          f"    {plan['lockdown_domains']}" if plan.get("lockdown_domains") else ".")
                       ) if as_flag(plan["lockdown"]) else
@@ -3653,6 +3681,11 @@ def check_quiz(s, ou, plan, by_hand=False):
                 if as_flag(plan["lockdown"]):
                     have = (got.get("domains") or "") if got.get("allow") else ""
                     row("LockDown sites", plan.get("lockdown_domains") or "(none)", have or "(none)")
+                if "monitor" in plan:
+                    row("Respondus Monitor", "required" if as_flag(plan["monitor"]) else "not required",
+                        got.get("monitor") or "(not read)")
+                if "second_camera" in plan:
+                    row("second camera", yes_no(as_flag(plan["second_camera"])), yes_no(got.get("second_camera")))
     if plan["csv_state"]:
         row(plan["csv"].name, "current", plan["csv_state"])
     table(["", "the plan says", "Brightspace has", ""], rows)
@@ -3717,7 +3750,10 @@ def drive_steps(plan, ou):
     if "lockdown" in plan:
         if as_flag(plan["lockdown"]):
             steps.append(("lockdown", ["lockdown", str(ou), plan["name"], "--go"]
-                          + (["--domains", plan["lockdown_domains"]] if plan.get("lockdown_domains") else [])))
+                          + (["--domains", plan["lockdown_domains"]] if plan.get("lockdown_domains") else [])
+                          + ([("--" if as_flag(plan["monitor"]) else "--no-") + "monitor"] if "monitor" in plan else [])
+                          + ([("--" if as_flag(plan["second_camera"]) else "--no-") + "second-camera"]
+                             if "second_camera" in plan else [])))
         else:
             steps.append(("lockdown", ["lockdown", str(ou), plan["name"], "--off", "--go"]))
     return steps
@@ -4650,6 +4686,10 @@ def main(argv=None):
                    help="require LockDown Browser, or with --no-lockdown not")
     x.add_argument("--lockdown-domains", dest="lockdown_domains",
                    help="the sites LockDown Browser lets a student open, one line with commas")
+    x.add_argument("--monitor", action=argparse.BooleanOptionalAction,
+                   help="require Respondus Monitor, the webcam, or with --no-monitor not; it takes LockDown")
+    x.add_argument("--second-camera", dest="second_camera", action=argparse.BooleanOptionalAction,
+                   help="require a second camera, a phone, which is Monitor's")
     x.add_argument("--visible", action=argparse.BooleanOptionalAction,
                    help="show it to students once its questions are in, or with --no-visible leave it hidden")
     x.add_argument("--by-hand", dest="by_hand", action="store_true",

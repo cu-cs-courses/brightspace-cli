@@ -1383,7 +1383,10 @@ if COOKIES_OK:
                           ({"visible": "soon"}, "visible: is true or false, not 'soon'"),
                           ({"lockdown_domains": "https://x.org/a"}, "lockdown_domains: are host names like"),
                           ({"lockdown": "false", "lockdown_domains": "x.org"},
-                           "lockdown_domains: are the sites LockDown Browser lets a student open")]:
+                           "lockdown_domains: are the sites LockDown Browser lets a student open"),
+                          ({"monitor": "webcam"}, "monitor: is true or false, not 'webcam'"),
+                          ({"monitor": "true", "lockdown": "false"}, "Respondus Monitor runs inside LockDown Browser"),
+                          ({"second_camera": "true", "monitor": "false"}, "second_camera: is Respondus Monitor's")]:
             run("setup-quiz", quiz_yml("bad.yml", **({"name": "Quiz 16"} | keys)), ok=False, has=[why],
                 lacks=["Traceback"])
         # LockDown and visibility: keys of the block, flags of the same names. Here,
@@ -1403,6 +1406,17 @@ if COOKIES_OK:
             has=["LockDown Browser required, 2 sites allowed", "a.org, b.edu", "Make it visible to students"])
         run("setup-quiz", quiz_yml("q22.yml", name="Quiz 22"), "--no-lockdown",
             has=["LockDown Browser not required", "Don't require LockDown Browser"])
+        # Respondus Monitor and its second camera, keys of the block too: each asks for
+        # the one before it, and the steps by hand say where to tick them.
+        run("setup-quiz", quiz_yml("q22.yml", name="Quiz 22", second_camera="true"),
+            has=["LockDown Browser required, no other site allowed; Respondus Monitor required, with a second camera",
+                 "Require LockDown Browser; Require Respondus Monitor; Monitor's Second Camera -> Require students "
+                 "use a second camera"])
+        run("setup-quiz", quiz_yml("q22.yml", name="Quiz 22"), "--monitor", "--no-second-camera",
+            has=["Respondus Monitor required\n", "Require Respondus Monitor; Monitor's Second Camera -> not required"],
+            lacks=["with a second camera"])
+        run("setup-quiz", quiz_yml("q22.yml", name="Quiz 22", lockdown="true"), "--no-monitor",
+            has=["Respondus Monitor not required", "Don't require Respondus Monitor"])
         broken = pathlib.Path(quiz_yml("bad.yml", name="Quiz 16", description=False))
         broken.write_text(broken.read_text().replace("\n\nquestions:", "\n  description: |\n    ```\n    open\n\nquestions:"))
         run("setup-quiz", str(broken), ok=False, has=["description: a block opened with ``` is never closed"],

@@ -7,7 +7,7 @@ a fresh load; without --go nothing is written.
 
     bs-drive.py header   COURSE QUIZ --header FILE [--footer FILE] [--go]
     bs-drive.py visible  COURSE QUIZ [--hidden] [--go]
-    bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--go]
+    bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--[no-]monitor] [--[no-]second-camera] [--go]
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
     bs-drive.py import   COURSE FILE.csv --section NAME [--go]
     bs-drive.py blanks   COURSE FILE.yml --section NAME [--go]
@@ -165,6 +165,21 @@ true
 """
 
 LDB_SUFFIX = "- Requires Respondus LockDown Browser"
+# Respondus renames a quiz it guards, and renames it again as the settings change:
+# "Quiz 9- Requires Respondus LockDown Browser", and with Monitor "Quiz 9 - Requires
+# Respondus LockDown Browser + Webcam" (2026-11-24). A quiz is known by the name
+# with that taken off.
+RESPONDUS_SUFFIX = re.compile(r"\s*-\s*Requires Respondus LockDown Browser(\s*\+\s*Webcam)?\s*$")
+
+
+def base_name(name):
+    return RESPONDUS_SUFFIX.sub("", name or "").strip()
+
+
+# A dashboard row is a quiz's whole name, whichever suffix it has, then its LockDown
+# column, Required or Not Required: so Quiz 1 is never Quiz 10's row.
+ROW_JS = r"""((t, base) => { const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('^' + esc + '(\\s*-\\s*Requires Respondus LockDown Browser(\\s*\\+\\s*Webcam)?)?\\s+(Not )?Required\\b').test(t); })"""
 EDITOR = "https://{host}/d2l/lms/quizzing/admin/modify/quiz_newedit_properties.d2l?qi={qi}&ou={ou}"
 RESPONDUS = "https://{host}/d2l/lms/quizzing/admin/modify/quiz_newedit_respondus.d2l?ou={ou}"
 
@@ -298,7 +313,7 @@ def quiz(ou, which):
     # so the name given may be the one before that.
     for q in data:
         name = q.get("Name", "")
-        if str(q.get("QuizId")) == str(which) or name == which or name == which + LDB_SUFFIX:
+        if str(q.get("QuizId")) == str(which) or name == which or base_name(name) == base_name(which):
             return int(q["QuizId"]), name
     sys.exit(f"no quiz {which!r} in org unit {ou}; the names are: " + "; ".join(q.get("Name", "?") for q in data))
 
@@ -413,23 +428,73 @@ def verb_visible(a):
 def respondus_row(p, name):
     """The quiz's row on the Respondus dashboard, by its exact name or the
     name with Respondus's own suffix."""
-    return p.b.eval(f"""findAll(e => e.tagName === 'TR' && (() => {{ const t = (e.innerText || '').replace(/\\s+/g, ' ').trim();
-        return t.startsWith({json.dumps(name)} + ' ') || t.startsWith({json.dumps(name)} + '-') || t === {json.dumps(name)}; }})())
+    return p.b.eval(f"""findAll(e => e.tagName === 'TR' && {ROW_JS}((e.innerText || '').replace(/\\s+/g, ' ').trim(), {json.dumps(base_name(name))}))
         .map(e => e.innerText.replace(/\\s+/g, ' ').trim().slice(0, 140))""")
 
 
 def open_settings(p, name):
-    pat = json.dumps(name)
-    p.click_pred(f"""e => e.tagName === 'A' && e.closest('tr') && ((e.closest('tr').innerText || '').replace(/\\s+/g, ' ').trim().startsWith({pat}))""",
+    pat = json.dumps(base_name(name))
+    p.click_pred(f"""e => e.tagName === 'A' && e.closest('tr') && {ROW_JS}((e.closest('tr').innerText || '').replace(/\\s+/g, ' ').trim(), {pat})""",
                  settle=3, what=f"the row of {name!r} on the LockDown dashboard")
     p.click_pred("""e => e.tagName === 'A' && e.textContent.trim() === 'Settings'""", settle=8, what="the row's Settings")
 
 
+# Respondus Monitor, below LockDown on the same page: one radio group, monitorEnabled,
+# whose ids start monitorEnabledTrue_ (required), monitorEnabledFalse_ (not) and
+# liveProctoringEnabled_ (an instructor proctoring over Zoom, Teams and the like);
+# and, folded under Monitor's own Advanced Settings, the box requiring a second
+# camera, a phone that scans a QR code. Read off 100's Progress Exam 1, 2026-11-24.
+MONITOR = "findAll(e => e.tagName === 'INPUT' && e.name === 'monitorEnabled' && e.type === 'radio' && e.id.startsWith({}))[0]"
+SECOND = "findAll(e => e.tagName === 'INPUT' && e.id === 'secondCameraEnabled')[0]"
+
+
 def read_lockdown(p):
     p.click_pred("""e => e.tagName === 'A' && /Advanced Settings/i.test(e.textContent || '')""", settle=3, must=False)
-    return p.b.eval("""({required: (findAll(e => e.tagName === 'INPUT' && e.name === 'ldbEnabled' && e.value === 'true')[0] || {}).checked,
-                        allow: (findAll(e => e.tagName === 'INPUT' && e.id === 'allowExternalDomains')[0] || {}).checked,
-                        domains: (findAll(e => e.tagName === 'TEXTAREA' && e.id === 'externalDomains')[0] || {}).value})""")
+    return p.b.eval(f"""({{required: (findAll(e => e.tagName === 'INPUT' && e.name === 'ldbEnabled' && e.value === 'true')[0] || {{}}).checked,
+                        allow: (findAll(e => e.tagName === 'INPUT' && e.id === 'allowExternalDomains')[0] || {{}}).checked,
+                        domains: (findAll(e => e.tagName === 'TEXTAREA' && e.id === 'externalDomains')[0] || {{}}).value,
+                        monitor: (() => {{ const e = findAll(e => e.tagName === 'INPUT' && e.name === 'monitorEnabled' && e.type === 'radio' && e.checked)[0];
+                                          return !e ? null : e.id.startsWith('monitorEnabledTrue_') ? 'required'
+                                                 : e.id.startsWith('liveProctoringEnabled_') ? 'live proctoring' : 'not required'; }})(),
+                        second_camera: !!({SECOND} || {{}}).checked}})""")
+
+
+def set_monitor(b, p, monitor, second):
+    """Respondus Monitor required or not, and the second camera, on the settings page
+    as it stands; nothing saved. Exits, with nothing saved, when a box will not change."""
+    shown = lambda js: b.eval(f"(() => {{ const e = {js}; if (!e) return false; const r = e.getBoundingClientRect(); "
+                              "return r.width > 0 && r.height > 0 && e.offsetParent !== null; })()")
+    if monitor is not None:
+        radio = MONITOR.format(json.dumps("monitorEnabledTrue_" if monitor else "monitorEnabledFalse_"))
+        if not b.eval(f"({radio} || {{}}).checked"):
+            r = b.eval(f"(() => {{ const e = {radio}; if (!e) return null; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()")
+            if not r:
+                sys.exit("no Respondus Monitor radio on the page; nothing saved")
+            b.click_xy(r["x"], r["y"]); time.sleep(2)
+            # Monitor chosen on a course for the first time opens Respondus's introduction
+            # over the page, ending "Continue to Respondus Monitor >>": until it is closed
+            # every click lands on it. Its "Don't show this message again" is left alone.
+            p.click_pred("e => /^(BUTTON|INPUT|A)$/.test(e.tagName) && /^Continue to Respondus Monitor/i.test((e.value || e.textContent || '').trim())"
+                         " && e.getBoundingClientRect().width > 0", settle=2, must=False)
+            if not b.eval(f"({radio} || {{}}).checked"):
+                sys.exit(f"Respondus Monitor did not become {'required' if monitor else 'not required'}; nothing saved")
+    if second is not None:
+        # Folded under Monitor's own Advanced Settings, the link of that name after the
+        # Monitor radios (LockDown's comes first), and there under Second Camera.
+        after = ("(e.compareDocumentPosition(findAll(x => x.tagName === 'INPUT' && x.name === 'monitorEnabled')[0])"
+                 " & Node.DOCUMENT_POSITION_PRECEDING)")
+        for link in ("Advanced Settings", "Second Camera"):
+            if shown(SECOND):
+                break
+            p.click_pred(f"e => e.tagName === 'A' && (e.textContent || '').trim() === {json.dumps(link)} && "
+                         f"e.getBoundingClientRect().width > 0 && {after}", settle=2, must=False)
+        if not shown(SECOND):
+            sys.exit("the box requiring a second camera is not on the screen; nothing saved")
+        if bool(b.eval(f"{SECOND}.checked")) != second:
+            r = b.eval(f"(() => {{ const e = {SECOND}; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()")
+            b.click_xy(r["x"], r["y"]); time.sleep(2)
+            if bool(b.eval(f"{SECOND}.checked")) != second:
+                sys.exit("the box requiring a second camera did not change; nothing saved")
 
 
 def verb_lockdown(a):
@@ -437,6 +502,11 @@ def verb_lockdown(a):
     domains = ", ".join(d.strip() for d in re.split(r"[,\n]", a.domains or "") if d.strip())
     if a.off and domains:
         sys.exit("--off takes no --domains")
+    if a.off and (a.monitor or a.second_camera):
+        sys.exit("Respondus Monitor runs inside LockDown Browser, so --off takes no --monitor or --second-camera")
+    if a.second_camera and a.monitor is False:
+        sys.exit("a second camera is Respondus Monitor's, so --second-camera takes Monitor, not --no-monitor")
+    monitor = True if a.second_camera else a.monitor
     b, p = session(ou, qi, height=1400, respondus=True)
     try:
         rows = respondus_row(p, name)
@@ -447,11 +517,15 @@ def verb_lockdown(a):
         have = read_lockdown(p)
         if a.json:
             print(json.dumps(have)); return
-        print(f"now: required={have['required']} external domains allowed={have['allow']} domains={have['domains']!r}")
+        print(f"now: required={have['required']} external domains allowed={have['allow']} domains={have['domains']!r} "
+              f"monitor={have['monitor']} second camera={have['second_camera']}")
         if "\n" in (have["domains"] or ""):
             print("  (stored with newlines: LockDown then opens each site's first page and nothing behind it)")
         if not a.go:
-            print(f"would set: required={not a.off} domains={domains!r}; nothing written; add --go"); return
+            print(f"would set: required={not a.off} domains={domains!r}"
+                  + (f" monitor={'required' if monitor else 'not required'}" if monitor is not None else "")
+                  + (f" second camera={a.second_camera}" if a.second_camera is not None else "")
+                  + "; nothing written; add --go"); return
         p.click_pred(f"""e => e.tagName === 'INPUT' && e.name === 'ldbEnabled' && e.value === {json.dumps('false' if a.off else 'true')}""", settle=2, what="the Require radio")
         if not a.off:
             # On a quiz never required before, Advanced Settings appears only now,
@@ -483,6 +557,8 @@ def verb_lockdown(a):
             b.insert(domains); time.sleep(1)
             if b.eval(f"{BOX}.value").strip() != domains:
                 sys.exit(f"the sites box reads {b.eval(f'{BOX}.value')!r}, not {domains!r}; nothing saved")
+        if not a.off and (monitor is not None or a.second_camera is not None):
+            set_monitor(b, p, monitor, a.second_camera)
         p.click_pred("""e => (e.tagName === 'INPUT' || e.tagName === 'BUTTON' || e.tagName === 'A') && /Save \\+ Close/.test(e.value || e.textContent || '')""", settle=10, what="Save + Close")
         print("row after save:", (respondus_row(p, name) or ["?"])[0])
     finally:
@@ -494,9 +570,14 @@ def verb_lockdown(a):
         got = read_lockdown(p)
     finally:
         b.close()
-    print(f"checked on the server: required={got['required']} external domains allowed={got['allow']} domains={got['domains']!r}")
+    print(f"checked on the server: required={got['required']} external domains allowed={got['allow']} domains={got['domains']!r} "
+          f"monitor={got['monitor']} second camera={got['second_camera']}")
     ok = (got["required"] is (not a.off)) and (a.off or (got["domains"] == domains and got["allow"] if domains
                                                     else not got["allow"]))
+    if not a.off and monitor is not None:
+        ok &= got["monitor"] == ("required" if monitor else "not required")
+    if not a.off and a.second_camera is not None:
+        ok &= got["second_camera"] is a.second_camera
     if not ok:
         sys.exit(1)
 
@@ -1154,6 +1235,10 @@ def main():
     s = sub.add_parser("lockdown", help="require LockDown Browser, with its allowed domains"); common(s)
     s.add_argument("--domains", help="one comma-separated line, as exam.py header prints it")
     s.add_argument("--off", action="store_true", help="LockDown not required")
+    s.add_argument("--monitor", action=argparse.BooleanOptionalAction,
+                   help="require Respondus Monitor, or with --no-monitor not; left alone without either")
+    s.add_argument("--second-camera", dest="second_camera", action=argparse.BooleanOptionalAction,
+                   help="require a second camera, which is Monitor's; left alone without either")
     s.add_argument("--json", action="store_true", help="print the setting as JSON and change nothing")
     s.set_defaults(fn=verb_lockdown)
     s = sub.add_parser("special-access", help="put one user on the quiz's special access list"); common(s)

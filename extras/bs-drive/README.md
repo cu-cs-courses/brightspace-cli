@@ -67,6 +67,11 @@ newlines are taken silently and then the browser opens each allowed site's
 first page and nothing behind it, which is what happened on 2026-11-18 from a
 list retyped one host per line. The verb joins whatever it is given with `, `
 and warns when the stored value holds a newline. `--off` sets *Not Required*.
+`--monitor` requires **Respondus Monitor**, the webcam, in the section below,
+and `--no-monitor` does not; `--second-camera` ticks *Require students use a
+second camera in addition to the webcam*, under Monitor's *Second Camera*,
+and implies `--monitor`. Without any of the three, Monitor is left as it is;
+the readback, and `--json`, carry it either way.
 
 **`special-access`** opens *Availability Dates & Conditions → Manage Special
 Access*, and if the user is not on the list, *Add Users to Special Access*,
@@ -226,6 +231,22 @@ the same things.
   dialog's *select all* box by itself, which is the dialog's own bookkeeping
   and not a section ticked. A section opens with the button labeled *Expand
   <name> section*.
+- **Respondus Monitor is the same settings page, below LockDown**: one radio
+  group, `monitorEnabled`, whose ids start `monitorEnabledTrue_` (required),
+  `monitorEnabledFalse_` and `liveProctoringEnabled_` (an instructor
+  proctoring over Zoom, Teams and the like); the startup sequence's boxes
+  (`FACE_PIC_CHECK_ENABLED`, `ID_CHECK_ENABLED`, `ENV_CHECK_ENABLED` and the
+  rest); and, folded under the *Second Camera* section after Monitor's own
+  *Advanced Settings*, `secondCameraEnabled`. **Choosing Monitor for the
+  first time on a course opens Respondus's introduction over the page**, and
+  every click lands on it until its *Continue to Respondus Monitor >>* closes
+  it; its *Don't show this message again* is left alone. **Respondus renames
+  the quiz again**: *Quiz 9- Requires Respondus LockDown Browser* with
+  LockDown alone, *Quiz 9 - Requires Respondus LockDown Browser + Webcam* with
+  Monitor, and the first again without it; a quiz and its dashboard row are
+  found by the name with either taken off, the row's next word being its
+  LockDown column, so Quiz 1 is never Quiz 10's row. All read off 100's
+  Progress Exam 1 and proved on the 120 Devshell, 2026-11-24.
 - **On a quiz never required before, LockDown's Advanced Settings appears only
   once Require is chosen, folded,** and its boxes are in the page but not on the
   screen. A click on one there lands on nothing: the first one-call trial saved

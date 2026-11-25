@@ -288,6 +288,8 @@ brightspace:
 | `shell` | Make it in this empty shell, to copy into the course's sections afterwards. |
 | `lockdown` | `true` requires Respondus LockDown Browser, `false` turns it off. The copied quiz's setting when left out. |
 | `lockdown_domains` | The sites LockDown Browser lets a student open, as a list, one to a line, or one line with commas: host names, `cu-cs-courses.site`, never an address with `https://`. Gives `lockdown: true` when that is left out, and is refused beside `lockdown: false`. Without it, a required LockDown lets no other site open. |
+| `monitor` | `true` requires Respondus Monitor, the webcam, which runs inside LockDown Browser: it gives `lockdown: true`, and is refused beside `lockdown: false`. `false` turns Monitor off. The startup sequence stays as Respondus sets it: on a quiz never under Monitor, every step is on, Student Photo and Show ID included, and face detection stops a student from starting. Change those in the Respondus settings. |
+| `second_camera` | `true` requires a second camera in addition to the webcam, a phone that scans a QR code: it gives `monitor: true`, and is refused beside `monitor: false`. |
 | `visible` | `true` shows the quiz to students once its questions are in; `false` leaves it hidden. Left out, it is left hidden and the steps end by saying to show it. |
 
 Whatever the block leaves out comes from the course's quiz defaults, a file of
