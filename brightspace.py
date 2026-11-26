@@ -82,6 +82,7 @@ like one made by hand. Files go under the course's `dropbox =` directory, or
 """
 
 import argparse
+import base64
 import collections
 import datetime as dt
 import functools
@@ -2513,6 +2514,8 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
         payload["Shuffle"] = as_flag(args.shuffle_questions)
     if getattr(args, "paging", None) is not None:
         payload["PagingTypeId"] = paging_code(args.paging)
+    if getattr(args, "auto_publish", None) is not None:
+        payload["IsAutoSetGraded"] = as_flag(args.auto_publish)
     # A timer only when --minutes asks for one; otherwise the template's limit,
     # enforced or not, as read. --minutes defaulted to 50 until 2026-10-01, so a
     # quiz copied from Midterm Part 1, which has no timer, came out with an
@@ -2576,6 +2579,7 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
          else str(payload["NumberOfAttemptsAllowed"]), attempts_of(back)),
         ("questions shuffled", bool(payload.get("Shuffle")), bool(back.get("Shuffle"))),
         ("paging", payload.get("PagingTypeId"), back.get("PagingTypeId")),
+        ("auto-publish", bool(payload.get("IsAutoSetGraded")), bool(back.get("IsAutoSetGraded"))),
         ("time limit", limit_of(payload.get("SubmissionTimeLimit")), limit_of(back.get("SubmissionTimeLimit"))),
         ("IP range", ips(payload["RestrictIPAddressRange"]), ips(back.get("RestrictIPAddressRange"))),
         ("password", bool(args.password), bool(back.get("Password"))),
@@ -2713,6 +2717,351 @@ def same_name(a, b):
     return a.strip().lower() == b.strip().lower()
 
 
+# --- submission views ---------------------------------------------------------
+# What a student sees of an attempt once it is published: the primary view, and
+# additional views that each come into effect at a date, for one attempt, a range
+# of grades, or so many minutes after submission. Valence has no route for them at
+# any version. The quiz editor reads and writes them through the quizzes API at the
+# tenant's own host, in Siren, each setting an action of its own; this does the
+# same, with a bearer token minted from the session as the editor mints its own.
+# Unofficial. Read off the editor's requests and tried in the 120 Devshell,
+# 2026-11-26: a PATCH form-encoded lands at once, with no working copy to save.
+VIEW_KEYS = ("primary_view", "additional_views")
+# Every field of a view and what it is when a file leaves it out: what Brightspace
+# gives a view it has just made, so that a file names only what it changes.
+VIEW_FIELDS = {"grade": True, "questions": "none", "answers": False, "responses": True,
+               "question_grades": False, "standards": False, "class_average": False,
+               "distribution": False, "message": ""}
+VIEW_LIMITS = ("from", "attempt", "grades", "minutes")
+QUESTION_SHOWS = ("none", "all", "incorrect", "correct")
+
+
+def view_spec(raw, at, additional=False, day=None):
+    """One view from a quiz file, checked, with every field; an additional view's
+    restrictions are off unless named. from: may be a time on the quiz's date."""
+    if not isinstance(raw, dict):
+        raise Failed(f"{at} is a block of keys such as grade: and questions:, not {raw!r}")
+    known = tuple(VIEW_FIELDS) + (VIEW_LIMITS if additional else ())
+    bad = [k for k in raw if k not in known]
+    if bad:
+        raise Failed(f"{at} has {', '.join(bad)}; {'an additional' if additional else 'the primary'} view "
+                     f"takes {', '.join(known)}")
+    spec = {}
+    for key, default in VIEW_FIELDS.items():
+        value = raw.get(key)
+        if value is None or (not str(value).strip() and key != "message"):
+            spec[key] = default
+            continue
+        if not isinstance(value, str):
+            raise Failed(f"{at} {key}: is text, not {value!r}")
+        word = value.strip().lower()
+        if key == "questions":
+            if word not in QUESTION_SHOWS:
+                raise Failed(f"{at} questions: is none, all, incorrect or correct, not {value!r}")
+            spec[key] = word
+        elif key == "message":
+            spec[key] = value
+        elif word in TRUTH | FALSITY:
+            spec[key] = word in TRUTH
+        else:
+            raise Failed(f"{at} {key}: is true or false, not {value!r}")
+    spec["message_html"] = quiz_format().md_html(spec["message"], f"{at} message") if spec["message"].strip() else ""
+    if not additional:
+        return spec
+    when = str(raw.get("from") or "").strip()
+    if not when:
+        raise Failed(f"{at} has no from:, the date and time it comes into effect, which Brightspace requires")
+    clock = time_of_day(when)
+    if clock:
+        if not day:
+            raise Failed(f"{at} from: {when} is a time of day, and the quiz has no date: to put it on")
+        when = f"{day} {clock}"
+    try:
+        spec["from"] = dt.datetime.fromisoformat(when).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        raise Failed(f"{at} from: is a date and time like 2026-11-18 00:01, or a time on the quiz's date, "
+                     f"not {when!r}")
+    for key in ("attempt", "minutes"):
+        value = str(raw.get(key) or "").strip()
+        if value and not re.fullmatch(r"[1-9]\d*", value):
+            raise Failed(f"{at} {key}: is a whole number, not {value!r}")
+        spec[key] = int(value) if value else None
+    grades = str(raw.get("grades") or "").strip()
+    spec["grades"] = None
+    if grades:
+        m = re.fullmatch(r"(\d{1,3})\s*%?\s*-\s*(\d{1,3})\s*%?", grades)
+        if not m or not int(m[1]) <= int(m[2]) <= 100:
+            raise Failed(f"{at} grades: is a range of percents like 0-50, not {grades!r}")
+        if spec["attempt"] is None:
+            raise Failed(f"{at} grades: narrows attempt:, which Brightspace offers only together; name the attempt")
+        spec["grades"] = (int(m[1]), int(m[2]))
+    return spec
+
+
+def view_line(spec, additional=False):
+    """A view in one line, as a person reads it."""
+    shown = ([] if spec["questions"] == "none" else
+             [x for x, on in (("answers", spec["answers"]), ("responses", spec["responses"]),
+                              ("question grades", spec["question_grades"])) if on])
+    what = ["grade" if spec["grade"] else "no grade",
+            ("no questions" if spec["questions"] == "none" else
+             f"{spec['questions']} questions" + (" with " + ", ".join(shown) if shown else ""))]
+    what += [x for x, on in (("standards", spec["standards"]), ("class average", spec["class_average"]),
+                              ("grade distribution", spec["distribution"])) if on]
+    if spec.get("message_html"):
+        what.append("a message")
+    if not additional:
+        return "; ".join(what)
+    when = [f"from {spec['from']}"]
+    if spec["attempt"]:
+        when.append(f"attempt {spec['attempt']}")
+    if spec["grades"]:
+        when.append(f"graded {spec['grades'][0]}-{spec['grades'][1]}%")
+    if spec["minutes"]:
+        when.append(f"for {spec['minutes']} minutes")
+    return ", ".join(when) + ": " + "; ".join(what)
+
+
+def same_view(a, b):
+    """Two views alike: what a hidden question list would show does not count."""
+    def key(v):
+        k = {f: v.get(f) for f in VIEW_FIELDS if f != "message"} | {f: v.get(f) for f in VIEW_LIMITS}
+        if k["questions"] == "none":
+            k |= {"answers": None, "responses": None, "question_grades": None}
+        return k
+    return key(a) == key(b) and same_html(a.get("message_html") or "", b.get("message_html") or "")
+
+
+class QuizViews:
+    """A quiz's submission views through the quizzes API, as the quiz editor reaches them."""
+
+    def __init__(self, s, ou, qid):
+        if not s.meta.get("xsrf"):
+            s.fetch_xsrf()
+        status, _, body, _ = s.request("POST", "/d2l/lp/auth/oauth2/token", data={"scope": "*:*:*"},
+                                       headers={"X-Csrf-Token": s.meta.get("xsrf", "")})
+        try:
+            self.token = json.loads(body)["access_token"]
+            part = self.token.split(".")[1]
+            tenant = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))["tenantid"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise Failed(f"no token for the quizzes API ({status}): the session's XSRF token was refused; "
+                         "`brightspace.py session` again")
+        base = os.environ.get("BRIGHTSPACE_QUIZZES_API") or f"https://{tenant}.quizzes.api.brightspace.com"
+        self.collection = f"{base.rstrip('/')}/{ou}/quizzes/{qid}/submissionviews"
+
+    def call(self, method, url, form=None):
+        data = urllib.parse.urlencode(form).encode() if form is not None else None
+        h = {"Authorization": "Bearer " + self.token, "User-Agent": USER_AGENT}
+        if data is not None:
+            h["Content-Type"] = "application/x-www-form-urlencoded"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, data=data, headers=h, method=method),
+                                        timeout=TIMEOUT) as r:
+                raw = r.read()
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as e:
+            raise HTTPFailed(e.code, f"{e.code} on {method} {url}: {e.read()[:300].decode('utf-8', 'replace')}")
+        except urllib.error.URLError as e:
+            raise Failed(f"{url}: {e.reason}")
+
+    @staticmethod
+    def find(entity, name):
+        for a in entity.get("actions") or []:
+            if a.get("name") == name:
+                return a
+        for sub in entity.get("entities") or []:
+            hit = QuizViews.find(sub, name)
+            if hit:
+                return hit
+        return None
+
+    @staticmethod
+    def part(entity, cls):
+        return next((e for e in entity.get("entities") or [] if cls in (e.get("class") or [])), None)
+
+    def act(self, href, name, values=None):
+        """One of a view's actions, its fields as they stand but for values."""
+        a = self.find(self.call("GET", href), name)
+        if not a:
+            raise Failed(f"Brightspace offers no {name} on this view"
+                         + (": a quiz with one attempt has no attempt to restrict a view to"
+                            if "attempt" in name else ""))
+        form = {}
+        for f in a.get("fields") or []:
+            v = (values or {}).get(f["name"], f.get("value"))
+            if isinstance(v, list):
+                v = next((x.get("value") for x in v if x.get("selected")), None)
+            if isinstance(v, bool):
+                v = "true" if v else "false"
+            if v is not None:
+                form[f["name"]] = v
+        return self.call(a.get("method", "PATCH"), a["href"], form if a.get("method", "PATCH") != "DELETE" else None)
+
+    def views(self):
+        """[(href, additional, entity)], the primary view first."""
+        out = []
+        for e in self.call("GET", self.collection).get("entities") or []:
+            out.append((e["href"], "secondary" in (e.get("class") or []), self.call("GET", e["href"])))
+        return sorted(out, key=lambda v: v[1])
+
+    def read(self, entity, additional):
+        """A view as view_spec gives one, read off its entity."""
+        def flag(name):
+            a = self.find(entity, name)
+            return bool(a and a["fields"] and a["fields"][0].get("value"))
+        hs = self.part(entity, "hide-show-questions") or {}
+        shown = (hs.get("entities") or [{}])[0].get("class") or []
+        spec = {"grade": flag("update-show-attempt-score"),
+                "questions": ("none" if "hide-questions" in (hs.get("class") or []) else
+                              next((q for q in ("all", "incorrect", "correct") if f"{q}-questions" in shown), "all")),
+                "answers": "show-correct-answers" in shown, "responses": "show-learner-responses" in shown,
+                "question_grades": "show-question-score" in shown, "standards": flag("update-show-standards"),
+                "class_average": flag("update-show-stats-class-average"),
+                "distribution": flag("update-show-stats-score-distribution")}
+        spec["message_html"] = ((self.part(entity, "message") or {}).get("properties") or {}).get("html") or ""
+        spec["message"] = spec["message_html"]
+        if not additional:
+            return spec
+        classes = entity.get("class") or []
+        when = ((self.part(entity, "release-date") or {}).get("properties") or {}).get("localizedDate") or ""
+        spec["from"] = when[:16].replace("T", " ")
+        attempts = self.part(entity, "attempt-restrictions") or {}
+        spec["attempt"] = (attempts.get("properties") or {}).get("value") if "attempt-restrictions" in classes else None
+        # The grade range is on when the attempt part says so in its class; its
+        # numbers are there either way, as None while it is off (Quiz 12, 115).
+        on = spec["attempt"] and "grade-restrictions" in (attempts.get("class") or [])
+        grades = ((self.part(attempts, "grade-restrictions") or {}).get("properties") or {}) if on else {}
+        spec["grades"] = ((round(grades.get("min-grade") or 0), round(grades.get("max-grade") or 0)) if on else None)
+        spec["minutes"] = (((self.part(entity, "time-limit") or {}).get("properties") or {}).get("value")
+                           if "time-limit" in classes else None)
+        return spec
+
+    def write(self, href, spec, additional):
+        self.act(href, "update-show-attempt-score", {"showAttemptScore": spec["grade"]})
+        hide = spec["questions"] == "none"
+        self.act(href, "update-hide-show-questions", {"hideShowQuestions": "hide-questions" if hide else "show-questions"})
+        if not hide:
+            self.act(href, "update-show-questions", {"showQuestions": f"{spec['questions']}-questions"})
+            self.act(href, "update-show-correct-answers", {"showCorrectAnswers": spec["answers"]})
+            self.act(href, "update-show-learner-responses", {"showLearnerResponses": spec["responses"]})
+            self.act(href, "update-show-question-score", {"showQuestionScore": spec["question_grades"]})
+        self.act(href, "update-show-standards", {"showStandards": spec["standards"]})
+        self.act(href, "update-show-stats-class-average", {"showStatsClassAverage": spec["class_average"]})
+        self.act(href, "update-show-stats-score-distribution", {"showStatsScoreDistribution": spec["distribution"]})
+        self.act(href, "update-message", {"message": spec["message_html"]})
+        if not additional:
+            return
+        self.act(href, "update-release-date", {"releaseDate": local_to_utc(spec["from"])})
+        self.act(href, "update-attempt-restrictions", {"restrictAttempts": bool(spec["attempt"])})
+        if spec["attempt"]:
+            self.act(href, "update-attempt-restriction-number", {"attemptRestrictionNumber": spec["attempt"]})
+            self.act(href, "update-grade-restrictions", {"restrictGrades": bool(spec["grades"])})
+            if spec["grades"]:
+                self.act(href, "update-min-max-grade", {"minGrade": spec["grades"][0], "maxGrade": spec["grades"][1]})
+        self.act(href, "update-time-limit", {"timeLimit": bool(spec["minutes"])})
+        if spec["minutes"]:
+            self.act(href, "update-time-limit-number", {"timeLimitNumber": spec["minutes"]})
+
+    def add(self):
+        before = {h for h, _, _ in self.views()}
+        self.act(self.collection, "add")
+        new = [h for h, extra, _ in self.views() if extra and h not in before]
+        if len(new) != 1:
+            raise Failed(f"an additional view was asked for, and {len(new)} arrived")
+        return new[0]
+
+    def read_all(self):
+        """(the primary view, [the additional views]) as specs."""
+        have = self.views()
+        primary = next((self.read(e, False) for _, extra, e in have if not extra), None)
+        return primary, [self.read(e, True) for _, extra, e in have if extra]
+
+
+def write_views(s, ou, qid, primary=None, additional=None):
+    """The primary view, and the additional views in place of those there,
+    as the specs say; None leaves that part as it is. Read back."""
+    qv = QuizViews(s, ou, qid)
+    have = qv.views()
+    if primary is not None:
+        qv.write(next(h for h, extra, _ in have if not extra), primary, False)
+    if additional is not None:
+        for href, extra, _ in have:
+            if extra:
+                qv.act(href, "delete-submission-view")
+        for spec in additional:
+            qv.write(qv.add(), spec, True)
+    got_primary, got_more = qv.read_all()
+    checks = []
+    if primary is not None:
+        checks.append(("primary view", view_line(primary), view_line(got_primary)
+                       if same_view(primary, got_primary) else view_line(got_primary) + " (differs)"))
+    if additional is not None:
+        checks.append(("additional views", len(additional), len(got_more)))
+        for n, (want, got) in enumerate(zip(additional, got_more), 1):
+            checks.append((f"additional view {n}", view_line(want, True),
+                           view_line(got, True) if same_view(want, got) else view_line(got, True) + " (differs)"))
+    check_landed(checks, "views written")
+
+
+def views_yaml(primary, additional):
+    """A quiz's views as a quiz file's brightspace: block would hold them: the
+    fields that differ from VIEW_FIELDS, and a message as the HTML it is."""
+    def fields(spec, indent):
+        out = []
+        for key, default in VIEW_FIELDS.items():
+            if key == "message":
+                continue
+            v = spec[key]
+            if key in ("answers", "responses", "question_grades") and spec["questions"] == "none":
+                continue
+            if v != default or key == "questions":
+                out.append(f"{indent}{key}: {str(v).lower() if isinstance(v, bool) else v}")
+        if spec.get("message_html"):
+            out += [f"{indent}message: |", f"{indent}  ```{{=html}}", f"{indent}  {spec['message_html']}", f"{indent}  ```"]
+        return out
+    lines = ["  primary_view:"] + fields(primary, "    ")
+    lines.append("  additional_views:" + ("" if additional else " []"))
+    for spec in additional:
+        lines.append(f"  - from: {spec['from']}")
+        lines += [f"    {k}: {spec[k]}" for k in ("attempt", "minutes") if spec[k]]
+        if spec["grades"]:
+            lines.append(f"    grades: {spec['grades'][0]}-{spec['grades'][1]}")
+        lines += fields(spec, "    ")
+    return "\n".join(lines)
+
+
+def cmd_views(args):
+    """A quiz's submission views: printed as the YAML a quiz file holds, or
+    written from one, primary_view: and additional_views: from its brightspace: block."""
+    s, ou, _ = course(args)
+    q = quiz_detail(s, ou, args.quiz)
+    if not args.file:
+        primary, more = QuizViews(s, ou, q["QuizId"]).read_all()
+        print(f"# {q['Name']}: what a student sees once an attempt is published.")
+        print("# Fields left out are " + ", ".join(f"{k}: {str(v).lower() if isinstance(v, bool) else v or chr(39) * 2}"
+                               for k, v in VIEW_FIELDS.items()) + ".")
+        print("brightspace:")
+        print(f"  auto_publish: {str(bool(q.get('IsAutoSetGraded'))).lower()}")
+        print(views_yaml(primary, more))
+        return
+    plan = quiz_plan(pathlib.Path(args.file))
+    if not any(k in plan for k in VIEW_KEYS):
+        raise Failed(f"{args.file} has neither primary_view: nor additional_views: in its brightspace: block")
+    print(f"{q['Name']!r} (id {q['QuizId']}):")
+    if "primary_view" in plan:
+        print("  primary view: " + view_line(plan["primary_view"]))
+    for n, spec in enumerate(plan.get("additional_views") or [], 1):
+        print(f"  additional view {n}: " + view_line(spec, True))
+    if "additional_views" in plan:
+        print("  in place of the additional views it has" if plan["additional_views"] else
+              "  and no additional views: those it has are deleted")
+    if not args.go:
+        print("  nothing sent; --go writes them")
+        return
+    write_views(s, ou, q["QuizId"], plan.get("primary_view"), plan.get("additional_views"))
+
+
 def cmd_copy_quiz(args):
     """Copy the one quiz in a shell course into each of several sections.
 
@@ -2802,10 +3151,18 @@ def cmd_copy_quiz(args):
                 payload |= {"GradeItemId": item["Id"], "AutoExportToGrades": True}
                 s.send("PUT", f"/d2l/api/le/{le}/{dest.ou}/quizzes/{qid}", payload)
             back = quiz_detail(s, dest.ou, str(qid))
+            views = [QuizViews(s, o, i).read_all() for o, i in ((shell.ou, q["QuizId"]), (dest.ou, qid))]
+            same = (same_view(views[0][0], views[1][0]) and len(views[0][1]) == len(views[1][1])
+                    and all(same_view(a, b) for a, b in zip(views[0][1], views[1][1])))
+            if not same:
+                # Not yet seen with views worth carrying (2026-11-26): say how to mend it.
+                print(f"  the shell's submission views did not come with the copy; brightspace.py views {label} "
+                      f"{shell_quote(name)} QUIZ.yml --go writes them from the quiz's file")
             check_landed([("name", name, back.get("Name")),
                           ("questions", questions, len(quiz_questions(s, dest.ou, qid))),
                           ("shown", q.get("IsActive"), back.get("IsActive")),
-                          ("dates", dates, (back.get("StartDate"), back.get("EndDate"), back.get("DueDate")))]
+                          ("dates", dates, (back.get("StartDate"), back.get("EndDate"), back.get("DueDate"))),
+                          ("submission views", True, same)]
                          + ([("grade item", item["Id"], back.get("GradeItemId"))] if item else []), "copied")
         except Failed as e:
             failed.append(label)
@@ -3264,7 +3621,7 @@ QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attem
              "points", "grade_item", "description", "header", "footer", "shell", "calendar", "special_access_only",
              "lockdown", "lockdown_domains", "lockdown_password", "monitor", "second_camera", "proctored_lab",
              "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code",
-             "shuffle_questions", "paging", "visible")
+             "shuffle_questions", "paging", "auto_publish", "primary_view", "additional_views", "visible")
 # The quiz's paging, as the YAML names it and as PagingTypeId holds it: read off
 # the editor's menu for each code in the 120 Devshell, 2026-11-25; 5 and up are
 # refused, "PagingTypeId must be between 0 and 4".
@@ -3344,7 +3701,7 @@ def check_value(key, value, at):
     if key == "paging":
         paging_code(value)
     if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "proctored_lab",
-               "shuffle_questions", "visible") \
+               "shuffle_questions", "auto_publish", "visible") \
             and value.strip().lower() not in TRUTH | FALSITY:
         raise Failed(f"{at} {key}: is true or false, not {value!r}")
     for name, known in (("monitor_steps", MONITOR_STEPS), ("face_detection", FACE_OPTIONS)):
@@ -3421,6 +3778,10 @@ def quiz_defaults(path=None):
         for key, value in keys.items():
             if key not in DEFAULT_KEYS:
                 raise Failed(f"{at} {key} is not a default; a course's are {', '.join(DEFAULT_KEYS)}")
+            if key in VIEW_KEYS:
+                check_default(key, value, at)
+                out[label][key] = value
+                continue
             if not isinstance(value, str):
                 raise Failed(f"{at} {key}: is text, not {value!r}")
             if key != "grade_item" and value.strip() in fmt.NONE:
@@ -3431,7 +3792,14 @@ def quiz_defaults(path=None):
 
 
 def check_default(key, value, at):
-    if key in ("start", "end"):
+    if key == "primary_view":
+        view_spec(value, f"{at} primary_view:", False, "2000-01-01")
+    elif key == "additional_views":
+        if not isinstance(value, list):
+            raise Failed(f"{at} additional_views: is a list of views, each starting with - from:")
+        for n, v in enumerate(value, 1):
+            view_spec(v, f"{at} additional_views: view {n}:", True, "2000-01-01")
+    elif key in ("start", "end"):
         if not time_of_day(value):
             raise Failed(f"{at} {key}: is a time of day like 14:00, not {value!r}")
     elif key in TEXT_KEYS:
@@ -3453,7 +3821,7 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     flags = {k: v for k, v in (flags or {}).items() if v is not None}
     item_flag = flags.pop("grade_item", None)
     fmt = quiz_format()
-    data, csv_text, block = None, None, {}
+    data, csv_text, block, views_given = None, None, {}, {}
     if path:
         try:
             data = fmt.load(path.read_text(encoding="utf-8"))
@@ -3481,6 +3849,9 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         if not block and "course" not in flags:
             raise Failed(f"{path} has no brightspace: block to say which course the quiz goes in and when "
                          "it runs; extras/bs-yaml-quiz/README.md has its keys")
+        if isinstance(block, dict):
+            views_given = {k: block[k] for k in VIEW_KEYS if k in block}
+            block = {k: v for k, v in block.items() if k not in VIEW_KEYS}
         unknown = [k for k in block if k not in QUIZ_KEYS]
         if unknown:
             raise Failed(f"{path}: brightspace: has {', '.join(unknown)}, which setup-quiz does not know; "
@@ -3498,8 +3869,11 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     defaults = quiz_defaults(defaults_path).get(course_label, {})
     plan, used = dict(given), []
     for key in DEFAULT_KEYS[:-2]:
-        if key not in plan and key != "grade_item" and key in defaults:
+        if key not in plan and key != "grade_item" and key in defaults and key not in VIEW_KEYS:
             plan[key], used = defaults[key], used + [key]
+    for key in VIEW_KEYS:
+        if key not in views_given and key in defaults:
+            views_given[key], used = defaults[key], used + [key]
     if item_flag is not None:
         plan["item"] = item_flag
     elif "grade_item" in block:
@@ -3513,7 +3887,7 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only",
                 "lockdown", "lockdown_domains", "lockdown_password", "monitor", "second_camera", "proctored_lab",
                 "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code",
-                "shuffle_questions", "paging", "visible"):
+                "shuffle_questions", "paging", "auto_publish", "visible"):
         if key in plan:
             check_value(key, plan[key], at)
     if "lockdown_domains" in plan:
@@ -3578,6 +3952,21 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     if day and "start" not in plan and "end" not in plan:
         raise Failed(f"{at} date: {day} needs a time to open and one to close: start and end, "
                      f"given or in {course_label}'s defaults")
+    # What a student sees once an attempt is published: written over the quizzes
+    # API after the quiz is made. A view for one attempt needs a quiz with more.
+    if "primary_view" in views_given:
+        plan["primary_view"] = view_spec(views_given["primary_view"], f"{at} primary_view:", False, day)
+    if "additional_views" in views_given:
+        raw = views_given["additional_views"]
+        if not isinstance(raw, list):
+            raise Failed(f"{at} additional_views: is a list of views, each starting with - from:")
+        plan["additional_views"] = [view_spec(v, f"{at} additional_views: view {n}:", True, day)
+                                    for n, v in enumerate(raw, 1)]
+        attempts = str(plan.get("attempts", "1")).lower()
+        for n, v in enumerate(plan["additional_views"], 1):
+            if v["attempt"] and attempts != "unlimited" and v["attempt"] > int(attempts):
+                raise Failed(f"{at} additional_views: view {n}: attempt: {v['attempt']}, and the quiz allows "
+                             f"{attempts} attempt{'s' if attempts != '1' else ''}")
     if "points" in given and not plan["item"]:
         raise Failed(f"{at} points: is what its grade item is out of, and grade_item: none makes none")
     if "points" in given and "shell" in plan:
@@ -3655,6 +4044,9 @@ def quiz_summary(plan, template=None):
                        + (f", startup steps: {plan['monitor_steps']}" if "monitor_steps" in plan else "")
                        + (f", face detection: {plan['face_detection']}" if "face_detection" in plan else ""))
                       if as_flag(plan["monitor"]) else "Respondus Monitor not required")
+    if "auto_publish" in plan:
+        extras.append("results published on submission" if as_flag(plan["auto_publish"]) else
+                      "results published by hand")
     if "shuffle_questions" in plan:
         extras.append("questions shuffled" if as_flag(plan["shuffle_questions"]) else "questions in order")
     if "paging" in plan:
@@ -3663,6 +4055,10 @@ def quiz_summary(plan, template=None):
         extras.append("made visible once its questions are in" if as_flag(plan["visible"]) else "left hidden")
     if extras:
         lines.append("  " + "; ".join(extras))
+    if "primary_view" in plan:
+        lines.append("  primary view: " + view_line(plan["primary_view"]))
+    for n, spec in enumerate(plan.get("additional_views") or [], 1):
+        lines.append(f"  additional view {n}: " + view_line(spec, True))
     if plan["used"]:
         lines.append(f"  from {plan['course']}'s defaults: {', '.join(plan['used'])}")
     return "\n".join(lines) + "\n"
@@ -3723,8 +4119,10 @@ def quiz_remainder(plan, template, shown, done=()):
                          f"    {plan['lockdown_domains']}" if plan.get("lockdown_domains") else ".")
                       ) if as_flag(plan["lockdown"]) else
                      "LockDown Browser tab -> the quiz's row -> Settings -> Don't require LockDown Browser.")
-    steps.append("Submission views, if students are to see more after an attempt than the default:\n"
-                 f"    none came from {template!r}, since no route reads or writes them.")
+    if not any(k in plan for k in VIEW_KEYS):
+        steps.append("Submission views, if students are to see more after an attempt than the default:\n"
+                     f"    none came from {template!r}; primary_view: and additional_views: in the file set them,\n"
+                     "    or brightspace.py views on the quiz once it is made.")
     if "visible" not in done and as_flag(plan.get("visible", "true")):
         steps.append("Make it visible to students, if the copies are to be: each keeps the shell's." if shell
                      else "Make it visible to students, once it has its questions.")
@@ -3817,6 +4215,19 @@ def check_quiz(s, ou, plan, by_hand=False):
                 else:
                     row(key, cut(want), cut(re.sub(r"<[^>]+>", "", got.get(key) or "").strip()) or "(none)",
                         same_html(plan[f"{key}_html"], got.get(key)))
+        if "auto_publish" in plan:
+            row("auto-publish", yes_no(as_flag(plan["auto_publish"])), yes_no(q.get("IsAutoSetGraded")))
+        if any(k in plan for k in VIEW_KEYS):
+            primary, more = QuizViews(s, ou, q["QuizId"]).read_all()
+            if "primary_view" in plan:
+                row("primary view", view_line(plan["primary_view"]), view_line(primary),
+                    same_view(plan["primary_view"], primary))
+            if "additional_views" in plan:
+                want = plan["additional_views"]
+                for n in range(max(len(want), len(more))):
+                    row(f"additional view {n + 1}", view_line(want[n], True) if n < len(want) else "(none)",
+                        view_line(more[n], True) if n < len(more) else "(none)",
+                        n < len(want) and n < len(more) and same_view(want[n], more[n]))
         if "visible" in plan:
             row("visible", yes_no(as_flag(plan["visible"])), yes_no(q.get("IsActive")))
         else:
@@ -3909,9 +4320,9 @@ def same_html(a, b):
     """Two pieces of HTML the same, as bs-drive's header readback compares them:
     the quiz editor writes a void tag without its slash, & as &amp;, a space
     after a style's colon, and rel="noopener" on every link, and keeps
-    newlines between blocks."""
+    newlines between blocks; a view's message comes back with ' as &#39;."""
     def norm(t):
-        t = re.sub(r"\s*/>", ">", re.sub(r">\s+<", "><", (t or "").replace("\n", " ").replace("&amp;", "&")))
+        t = re.sub(r"\s*/>", ">", re.sub(r">\s+<", "><", html.unescape((t or "").replace("\n", " "))))
         t = re.sub(r'\s+rel="noopener(?: noreferrer)?"', "", t)
         return re.sub(r'style="([^"]*)"', lambda m: 'style="' + re.sub(r"\s*([:;])\s*", r"\1", m[1]).strip() + '"',
                       t).strip()
@@ -4082,6 +4493,7 @@ def cmd_setup_quiz(args):
     made = make_quiz(argparse.Namespace(**common, like=None, start=plan.get("start"), end=plan.get("end"),
                                  minutes=plan.get("minutes"), attempts=plan.get("attempts", "1"),
                                  shuffle_questions=plan.get("shuffle_questions"), paging=plan.get("paging"),
+                                 auto_publish=plan.get("auto_publish"),
                                  ip=plan.get("ip"), password=plan.get("password"), grade_item=attach,
                                  calendar=plan.get("calendar"), special_access_only=plan.get("special_access_only"),
                                  active=False),
@@ -4094,6 +4506,17 @@ def cmd_setup_quiz(args):
     if args.go and any(k in plan for k in names_in):
         refuse_student_names(s, ou, f"the quiz {plan['name']!r}'s header, footer, exam password or start code",
                              *[plan.get(k) for k in names_in])
+    views_failed = False
+    if args.go and made and any(k in plan for k in VIEW_KEYS):
+        # A view that will not land stops nothing else: the questions still go in,
+        # and `views` writes the views again from the same file.
+        print("\nsubmission views, through the quizzes API:")
+        try:
+            write_views(s, ou, made["QuizId"], plan.get("primary_view"), plan.get("additional_views"))
+        except Failed as e:
+            views_failed = True
+            print(f"  {e}\n  the rest goes on; brightspace.py views {plan['course']} {shell_quote(plan['name'])} "
+                  f"{shell_quote(args.file)} --go writes them again")
     why = drive_unready(s, args.by_hand)
     steps = [] if why else drive_steps(plan, ou)
     done = set()
@@ -4125,7 +4548,7 @@ def cmd_setup_quiz(args):
         print(f"\nbs-drive does not take the steps by hand here: {why}.")
     print("\n" + quiz_remainder(plan, template["Name"], args.file, done))
     wanted = {k for k, _ in steps} | ({"visible"} if steps and as_flag(plan.get("visible")) and plan["path"] else set())
-    if args.go and not done >= wanted:
+    if args.go and (not done >= wanted or views_failed):
         sys.exit(1)
 
 
@@ -4770,6 +5193,11 @@ def main(argv=None):
     with_course("quizzes", cmd_quizzes, help="each quiz with its attempt counts")
     with_course("quiz", cmd_quiz, help="one quiz's settings: IP restriction, password, dates, attempts").add_argument(
         "quiz", help="the quiz's name (or enough of it), or its id")
+    x = with_course("views", cmd_views, description=cmd_views.__doc__,
+                    help="a quiz's submission views, as YAML; with a quiz file and --go, written from it")
+    x.add_argument("quiz", help="the quiz's name (or enough of it), or its id")
+    x.add_argument("file", nargs="?", help="a quiz file whose brightspace: block has primary_view: or additional_views:")
+    x.add_argument("--go", action="store_true", help="write them; without it, the plan is printed")
     with_course("checklists", cmd_checklists, description=cmd_checklists.__doc__,
                 help="the checklists; named, one checklist's items, as new-checklist takes them").add_argument(
         "checklist", nargs="?", help="the checklist's name (or enough of it), or its id")
@@ -4795,6 +5223,8 @@ def main(argv=None):
     x.add_argument("--end", help="local time, '2026-09-29 13:25'")
     x.add_argument("--minutes", help="enforced time limit, or none for no timer; without it, --like's limit is kept as it is")
     x.add_argument("--attempts", default=1, help="a whole number, or unlimited")
+    x.add_argument("--auto-publish", dest="auto_publish", action=argparse.BooleanOptionalAction,
+                   help="publish attempt results on submission; without either, --like's")
     x.add_argument("--shuffle-questions", dest="shuffle_questions", action=argparse.BooleanOptionalAction,
                    help="the questions in a new order for each student; without either, --like's")
     x.add_argument("--paging", help="questions to a page: all, 1, 5, 10, or sections; without it, --like's")
@@ -4889,6 +5319,8 @@ def main(argv=None):
     x.add_argument("--minutes", help="enforced time limit, or none for no timer; without it, the copied quiz's, "
                                      "unless the course's defaults say otherwise")
     x.add_argument("--attempts", help="a whole number, or unlimited")
+    x.add_argument("--auto-publish", dest="auto_publish", action=argparse.BooleanOptionalAction,
+                   help="publish attempt results on submission; without either, the copied quiz's")
     x.add_argument("--shuffle-questions", dest="shuffle_questions", action=argparse.BooleanOptionalAction,
                    help="the questions in a new order for each student; without either, the copied quiz's")
     x.add_argument("--paging", help="questions to a page: all, 1, 5, 10, or sections; without it, the copied quiz's")

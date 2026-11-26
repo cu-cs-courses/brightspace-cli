@@ -39,6 +39,7 @@ Python 3.11 or newer; the suite runs on 3.11 and 3.13.
     ./brightspace.py index 240 DIR...       an index.html for a Journal download made without one
     ./brightspace.py quizzes 240            each quiz with how many took one attempt and two
     ./brightspace.py quiz 240 'Midterm Part 1'   one quiz's settings, IP restriction included
+    ./brightspace.py views 240 'Quiz 9'          what students see of an attempt, as a quiz file's YAML
     ./brightspace.py classlist 240
     ./brightspace.py announcements 240
     ./brightspace.py checklists 115-01         the checklists; named, one's items as new-checklist takes them
@@ -686,13 +687,13 @@ with start and end as times of day:
 |---|---|
 | `like` | The quiz its settings come from; `previous`, the one numbered before it, when left out. |
 | `start`, `end` | The times it opens and closes, on the quiz's date. |
-| `minutes`, `attempts`, `ip`, `password`, `points`, `grade_item`, `description`, `header`, `footer`, `shuffle_questions`, `paging` | As in a quiz's block, the three texts in Markdown. |
+| `minutes`, `attempts`, `ip`, `password`, `points`, `grade_item`, `description`, `header`, `footer`, `shuffle_questions`, `paging`, `auto_publish`, `primary_view`, `additional_views` | As in a quiz's block, the three texts in Markdown and the two views as blocks; an additional view's `from:` may be a time of day, put on each quiz's date. |
 | `shell` | Where its quizzes are made, to be copied into the sections. |
 | `sections` | For a course taught as several: the labels of its sections, the first of which its settings come from. |
 | `item_like` | The grade item each section's copy is shaped like, where the section has none of the quiz's name; `previous` by default. |
 
-They cover what the API can set. Submission views, and the questions, stay a
-step by hand, and every run ends by naming them.
+They cover what the API can set. The questions stay a step for bs-drive, or by
+hand, and every run ends by naming what it did not do.
 
     ./brightspace.py quiz-defaults                      every course's
     ./brightspace.py quiz-defaults 120 --set minutes=10 --unset password
@@ -711,8 +712,13 @@ hand, or by D2L's CSV question import into the library. QTI import would not
 import on Commonwealth's instance.
 
 *Surveys*, *special access*, *submission views* and *shuffle per section* are
-not part of the quiz object at all; what students see after an attempt is set
-in the UI. **Special access, the header and footer, LockDown Browser and the
+not part of the quiz object at all. **Submission views are a command even so**:
+the quiz editor reads and writes them through the quizzes API at the tenant's
+own host, `https://<tenant>.quizzes.api.brightspace.com/<ou>/quizzes/<id>/submissionviews`,
+in Siren, each setting an action of its own, and `views` and `setup-quiz` do the
+same with a bearer token minted from the session, whose claims name the tenant.
+Unofficial, like the token; a PATCH lands at once, with no working copy to save
+(tried on a Devshell quiz, 2026-11-26). **Special access, the header and footer, LockDown Browser and the
 visibility switch are a command even so**: [`extras/bs-drive/`](extras/bs-drive/README.md)
 fills the editor's own forms in a headless browser with this tool's session,
 and reads each setting back. *Link attachments* on a folder are read-only: the documentation lists

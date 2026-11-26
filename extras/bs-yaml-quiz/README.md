@@ -281,6 +281,9 @@ brightspace:
 | `attempts` | How many, or `unlimited`. 1 when left out. |
 | `shuffle_questions` | `true` puts the questions in a new order for each student, `false` keeps the file's; left out, the copied quiz's. A question's own `shuffle:` is about its options, not this. |
 | `paging` | How many questions to a page: `all`, `1`, `5`, `10`, or `sections`, a page break after each section; left out, the copied quiz's. |
+| `auto_publish` | `true` publishes an attempt's results the moment it is submitted, *Auto-publish attempt results immediately upon completion*; the views below show nothing until results are published. Left out, the copied quiz's. |
+| `primary_view` | What a student sees of a published attempt, a block of the fields below. Left out, the primary view stays as Brightspace makes it. |
+| `additional_views` | Views that come into effect later, a list of blocks, each of the fields below and its restrictions. Given, they replace the quiz's additional views, and `[]` deletes them; left out, they stay as they are. |
 | `ip`, `password` | The addresses it can be taken from, as `148.137.150.0-148.137.150.255`, and a password. |
 | `points` | What its grade item is out of, when one is made. The copied item's when left out. |
 | `grade_item` | `none` for no grade item. Left out, the quiz goes to an item of its own name, made like the one `like` sends its scores to if there is none yet. |
@@ -301,6 +304,51 @@ brightspace:
 | `live_proctoring_code` | Live proctoring's start code, which students are given to begin. |
 | `second_camera` | `true` requires a second camera in addition to the webcam, a phone that scans a QR code: it gives `monitor: true`, and is refused beside `monitor: false`. |
 | `visible` | `true` shows the quiz to students once its questions are in; `false` leaves it hidden. Left out, it is left hidden and the steps end by saying to show it. |
+
+A view, in `primary_view` or one of `additional_views`, is Brightspace's
+*Customize Quiz Results Displays*, field for field. Each field left out is what
+Brightspace gives a new view:
+
+| Field | |
+|---|---|
+| `grade` | The attempt's grade. `true` when left out. |
+| `questions` | `none`, `all`, `incorrect` or `correct`: which questions are shown. `none` when left out. |
+| `answers` | The correct answers, beside the questions shown. `false`. |
+| `responses` | The student's own responses. `true`. |
+| `question_grades` | Each question's score. `false`. |
+| `standards`, `class_average`, `distribution` | The standards, the class average, the grade distribution. `false`. |
+| `message` | A message above the results, in Markdown. |
+
+An additional view comes into effect at `from:`, a date and time like
+`2026-11-18 00:01`, or a time on the quiz's `date:`; Brightspace requires it.
+Its restrictions are off unless named: `attempt: 2` for that attempt only,
+which a quiz of one attempt does not offer; `grades: 0-60`, a range of percents,
+which narrows `attempt:` and so needs it; `minutes: 10`, for that long after
+submission.
+
+```yaml
+brightspace:
+  attempts: 2
+  auto_publish: true
+  primary_view:
+    questions: none          # the grade alone
+  additional_views:
+  - from: 2026-11-18 00:01   # after attempt 1, the questions and the responses, for ten minutes
+    attempt: 1
+    minutes: 10
+    questions: all
+  - from: 2026-11-19 00:01   # after attempt 2, the answers too
+    attempt: 2
+    questions: all
+    answers: true
+```
+
+`brightspace.py views COURSE QUIZ` prints any quiz's views in this form, to
+copy one that already works. They are written through the quizzes API the quiz
+editor uses, not Valence, which has no route for them: `setup-quiz` writes them
+once the quiz is made and `--check` reads them back. `copy-quiz` compares each
+section's views with the shell's once its course copy is done, and says so
+should the copy not have carried them; `views` then writes them per section.
 
 Whatever the block leaves out comes from the course's quiz defaults, a file of
 blocks in these same keys, and `setup-quiz` takes each key as a flag too;

@@ -647,14 +647,24 @@ def to_csv(data, where, msa_as_sa=False):
     block = data.get("brightspace")
     # What the keys mean is brightspace.py's, which refuses one it does not know;
     # here the block only has to be a block, so the CSV never depends on it.
-    # One key takes a list: lockdown_domains, the sites LockDown Browser lets a
-    # student open, which reads best one to a line.
-    if not isinstance(block, (dict, type(None))) or any(
-            not (isinstance(v, str) or (k in ("lockdown_domains", "monitor_steps", "face_detection") and isinstance(v, list)
-                                        and all(isinstance(x, str) for x in v)))
-            for k, v in (block or {}).items()):
+    # Three keys take a list of text: lockdown_domains, the sites LockDown Browser
+    # lets a student open, which reads best one to a line, monitor_steps and
+    # face_detection. Two take blocks: primary_view, and additional_views, a list
+    # of them, which setup-quiz checks key by key.
+    def fits(k, v):
+        if isinstance(v, str):
+            return True
+        if k in ("lockdown_domains", "monitor_steps", "face_detection"):
+            return isinstance(v, list) and all(isinstance(x, str) for x in v)
+        if k == "primary_view":
+            return isinstance(v, dict)
+        if k == "additional_views":
+            return isinstance(v, list) and all(isinstance(x, dict) for x in v)
+        return False
+    if not isinstance(block, (dict, type(None))) or any(not fits(k, v) for k, v in (block or {}).items()):
         raise Failed(f"{where}: `brightspace:` is a block of `key: value` lines, each value text, "
-                     "but lockdown_domains, monitor_steps and face_detection, which may be lists")
+                     "but lockdown_domains, monitor_steps and face_detection, which may be lists, primary_view, "
+                     "a block, and additional_views, a list of blocks")
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
     for n, q in enumerate(data["questions"], 1):

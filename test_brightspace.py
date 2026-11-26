@@ -16,7 +16,106 @@ import urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCRIPT = str(pathlib.Path(__file__).with_name("brightspace.py"))
-XSRF, SECRET, BEARER, SECRET_VAL = "TOKEN123", "SESSIONSECRET", "BEARER1", "SESSIONVAL"
+XSRF, SECRET, SECRET_VAL = "TOKEN123", "SESSIONSECRET", "SESSIONVAL"
+# A bearer token shaped like Brightspace's, a JWT, whose claims name the tenant
+# whose quizzes API holds the submission views.
+BEARER = "e30." + base64.urlsafe_b64encode(json.dumps({"tenantid": "tenant-1"}).encode()).decode().rstrip("=") + ".sig"
+# The quizzes API, Siren: (ou, quiz id) -> the quiz's views, the primary first,
+# each its fields as the API names them. A quiz's primary view appears when read.
+HM_VIEWS, HM_NEXT = {}, [9000]
+def hm_new(kind):
+    HM_NEXT[0] += 1
+    return {"id": HM_NEXT[0], "kind": kind, "f": {
+        "showAttemptScore": True, "hideShowQuestions": "hide-questions", "showQuestions": "all-questions",
+        "showCorrectAnswers": False, "showLearnerResponses": True, "showQuestionScore": False, "showStandards": False,
+        "showStatsClassAverage": False, "showStatsScoreDistribution": False, "message": "",
+        "releaseDate": "2026-11-26T05:00:00.000Z", "restrictAttempts": False, "attemptRestrictionNumber": 1,
+        "restrictGrades": False, "minGrade": 0, "maxGrade": 0, "timeLimit": False, "timeLimitNumber": 120}}
+def hm_views(ou, qid):
+    return HM_VIEWS.setdefault((ou, qid), [hm_new("primary")])
+def hm_entity(base, ou, qid, v):
+    href, f = f"{base}/{ou}/quizzes/{qid}/submissionviews/{v['id']}", v["f"]
+    act = lambda name, field, typ, value: {"href": href, "name": name, "method": "PATCH",
+                                           "fields": [{"type": typ, "name": field, "value": value}]}
+    radio = lambda options, now: [{"value": o, "selected": o == now} for o in options]
+    shown = ["show-questions", f["showQuestions"]] + [c for c, k in (
+        ("show-learner-responses", "showLearnerResponses"), ("show-correct-answers", "showCorrectAnswers"),
+        ("show-question-score", "showQuestionScore")) if f[k]]
+    entities = [
+        {"class": ["hide-show-questions"] + (["hide-questions"] if f["hideShowQuestions"] == "hide-questions" else []),
+         "entities": [{"class": shown, "actions": [
+             act("update-show-questions", "showQuestions", "radio",
+                 radio(["all-questions", "incorrect-questions", "correct-questions"], f["showQuestions"])),
+             act("update-show-learner-responses", "showLearnerResponses", "checkbox", f["showLearnerResponses"]),
+             act("update-show-correct-answers", "showCorrectAnswers", "checkbox", f["showCorrectAnswers"]),
+             act("update-show-question-score", "showQuestionScore", "checkbox", f["showQuestionScore"])]}],
+         "actions": [act("update-hide-show-questions", "hideShowQuestions", "radio",
+                         radio(["show-questions", "hide-questions"], f["hideShowQuestions"]))]},
+        {"class": ["message", "richtext"], "properties": {"text": re.sub("<[^>]+>", "", f["message"]), "html": f["message"]},
+         "actions": [act("update-message", "message", "text", f["message"])]}]
+    actions = [act("update-show-attempt-score", "showAttemptScore", "checkbox", f["showAttemptScore"]),
+               act("update-show-stats-class-average", "showStatsClassAverage", "checkbox", f["showStatsClassAverage"]),
+               act("update-show-stats-score-distribution", "showStatsScoreDistribution", "checkbox",
+                   f["showStatsScoreDistribution"]),
+               act("update-show-standards", "showStandards", "checkbox", f["showStandards"])]
+    classes = ["submission-view", v["kind"]]
+    if v["kind"] == "secondary":
+        classes += (["attempt-restrictions"] if f["restrictAttempts"] else []) + (["time-limit"] if f["timeLimit"] else [])
+        local = dt.datetime.fromisoformat(f["releaseDate"].replace("Z", "+00:00")).astimezone()
+        actions += [{"href": href, "name": "delete-submission-view", "method": "DELETE"},
+                    act("update-time-limit", "timeLimit", "checkbox", f["timeLimit"]),
+                    act("update-attempt-restrictions", "restrictAttempts", "checkbox", f["restrictAttempts"])]
+        entities += [
+            {"class": ["release-date"], "properties": {"date": f["releaseDate"],
+                                                       "localizedDate": local.strftime("%Y-%m-%dT%H:%M:%S.000")},
+             "actions": [act("update-release-date", "releaseDate", "text", f["releaseDate"])]},
+            {"class": ["time-limit"], "properties": {"value": f["timeLimitNumber"]},
+             "actions": [act("update-time-limit-number", "timeLimitNumber", "number", f["timeLimitNumber"])]},
+            {"class": ["attempt-restrictions"] + (["grade-restrictions"] if f["restrictGrades"] else []),
+             "properties": {"value": f["attemptRestrictionNumber"]},
+             "entities": [{"class": ["grade-restrictions"], "properties": {"min-grade": f["minGrade"], "max-grade": f["maxGrade"]},
+                           "actions": [{"href": href, "name": "update-min-max-grade", "method": "PATCH", "fields": [
+                               {"type": "number", "name": "minGrade", "value": f["minGrade"]},
+                               {"type": "number", "name": "maxGrade", "value": f["maxGrade"]}]}]}] if f["restrictGrades"] else [],
+             "actions": [act("update-attempt-restriction-number", "attemptRestrictionNumber", "radio",
+                             radio([1, 2, 3], f["attemptRestrictionNumber"])),
+                         act("update-grade-restrictions", "restrictGrades", "checkbox", f["restrictGrades"])]}]
+    return {"class": classes, "entities": entities, "actions": actions, "links": [{"rel": ["self"], "href": href}]}
+def hm(handler, method, form=None):
+    """The quizzes API's submission views, at /hm/{ou}/quizzes/{qid}/submissionviews[/{id}]."""
+    m = re.fullmatch(r"/hm/(\d+)/quizzes/(\d+)/submissionviews(?:/(\d+))?", urllib.parse.urlsplit(handler.path).path)
+    if not m:
+        return False
+    if handler.headers.get("Authorization") != f"Bearer {BEARER}":
+        handler.send(401, "no token", "text/plain"); return True
+    base = f"http://127.0.0.1:{handler.server.server_address[1]}/hm"
+    ou, qid, vid = int(m[1]), int(m[2]), m[3]
+    views = hm_views(ou, qid)
+    coll = f"{base}/{ou}/quizzes/{qid}/submissionviews"
+    if vid is None and method == "GET":
+        handler.send(200, {"class": ["submission-views", "collection"],
+                           "entities": [{"class": ["submission-view", v["kind"]], "rel": ["item"],
+                                         "href": f"{coll}/{v['id']}"} for v in views],
+                           "actions": [{"href": coll, "name": "add", "method": "POST"}]})
+    elif vid is None and method == "POST":
+        views.append(hm_new("secondary"))
+        handler.send(201, hm_entity(base, ou, qid, views[-1]))
+    else:
+        v = next((x for x in views if x["id"] == int(vid or 0)), None)
+        if not v:
+            handler.send(404, "no view", "text/plain")
+        elif method == "GET":
+            handler.send(200, hm_entity(base, ou, qid, v))
+        elif method == "DELETE" and v["kind"] == "secondary":
+            views.remove(v); handler.send(204, b"")
+        elif method == "PATCH":
+            for k, (val,) in (form or {}).items():
+                old = v["f"].get(k)
+                v["f"][k] = (val == "true") if isinstance(old, bool) else int(val) if isinstance(old, int) else val
+            handler.send(200, hm_entity(base, ou, qid, v))
+        else:
+            handler.send(405, "no", "text/plain")
+    return True
 # The token the server currently expects, and whether /d2l/home hands it out.
 # Both mutable, so a test can rotate the token under the tool or take it away.
 TOKEN = {"now": XSRF}
@@ -203,7 +302,13 @@ class H(BaseHTTPRequestHandler):
         self.send_response(302); self.send_header("Location", to); self.send_header("Content-Length", "0")
         for k, v in extra: self.send_header(k, v)
         self.end_headers()
+    def do_PATCH(self):
+        n = int(self.headers.get("Content-Length", 0))
+        if not hm(self, "PATCH", urllib.parse.parse_qs(self.rfile.read(n).decode(), keep_blank_values=True)):
+            self.send(404, "nope", "text/plain")
     def do_GET(self):
+        if hm(self, "GET"):
+            return
         u = urllib.parse.urlsplit(self.path); q = urllib.parse.parse_qs(u.query); p = u.path
         port = self.server.server_address[1]
         if p == "/cdn-cgi/access/certs":      # Cloudflare Access's published keys, for brightspace-web
@@ -312,6 +417,8 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"Objects": [], "Next": None})
         return self.send(404, {"Errors": [{"Message": "unknown " + r}]})
     def do_DELETE(self):
+        if hm(self, "DELETE"):
+            return
         base = f"/d2l/api/le/1.99/{OU}/"
         if not self.headers.get("X-Csrf-Token"):
             return self.send(403, "CSRF token required", "text/plain")
@@ -386,6 +493,8 @@ class H(BaseHTTPRequestHandler):
         # The body can only be read once, so read it here and let each branch parse it.
         n = int(self.headers.get("Content-Length", 0)); raw = self.rfile.read(n)
         form = urllib.parse.parse_qs(raw.decode())
+        if hm(self, "POST", form):
+            return
         m = re.fullmatch(r"/d2l/api/le/1\.99/(\d+)/checklists/(.*)", self.path)
         if m:
             if self.headers.get("X-Csrf-Token") != TOKEN["now"]:
@@ -511,6 +620,7 @@ COURSES.write_text("# the suite's own\n\n[240]\nsite = site240\ndropbox = dropbo
                    f"[withsite]\nsite = {out / 'site'}\nou = {OU}\n\n[shell]\nou = {SHELL}\n")
 DEFAULTS = conf / "quiz-defaults.yml"
 env = dict(os.environ, BRIGHTSPACE_STATE_DIR=str(state), BRIGHTSPACE_URL=f"http://127.0.0.1:{port}",
+           BRIGHTSPACE_QUIZZES_API=f"http://127.0.0.1:{port}/hm",
            BRIGHTSPACE_USER="ada", BRIGHTSPACE_COURSES=str(COURSES), BRIGHTSPACE_QUIZ_DEFAULTS=str(DEFAULTS))
 fails = 0
 def run(*args, password="pw", ok=True, has=(), lacks=(), extra=None):
@@ -1004,7 +1114,7 @@ if COOKIES_OK:
     run("copy-quiz", "shell", "--to", "240", "--item-like", "Assignment 1", "--go",
         has=["into 240: attached to a new grade item 'Quiz 9', shaped like 'Assignment 1'",
              "copied, quiz 5101 (job 672000)", "made grade item 'Quiz 9'", "shaped like 'Assignment 1'",
-             "checked on the server: name, questions, shown, dates, grade item",
+             "checked on the server: name, questions, shown, dates, submission views, grade item",
              "'Quiz 9' is in 240; the shell still holds it, and --clear empties it"])
     COPYING["slow"] = False
     fails += QUIZZES_MADE[-1]["GradeItemId"] != ITEMS[-1]["Id"] or ITEMS[-1]["Name"] != "Quiz 9"
@@ -1445,6 +1555,61 @@ if COOKIES_OK:
             has=["Respondus Monitor required, startup steps: instructions, environment, face detection: notify",
                  "Require Respondus Monitor; Startup Sequence: on, instructions, environment, the rest off; "
                  "Face Detection Options: on, notify, the rest off"])
+        # Submission views: the primary view and additional ones, each from a date or a
+        # time on the quiz's date, written over the quizzes API once the quiz is made.
+        q27 = pathlib.Path(quiz_yml("q27.yml", name="Quiz 27", date="2026-10-13", start="12:30", end="14:00",
+                                    attempts="2", auto_publish="true"))
+        views = ("  primary_view:\n    questions: none\n  additional_views:\n"
+                 "  - from: 12:30\n    attempt: 1\n    minutes: 10\n    questions: all\n"
+                 "  - from: 2026-10-14 00:01\n    attempt: 2\n    grades: 0-50\n    questions: all\n    answers: true\n"
+                 "    message: |\n      See **Class 9**.\n")
+        q27.write_text(q27.read_text().replace("  description: |", views + "  description: |"))
+        run("setup-quiz", str(q27),
+            has=["results published on submission",
+                 "primary view: grade; no questions",
+                 "additional view 1: from 2026-10-13 12:30, attempt 1, for 10 minutes: grade; all questions with responses",
+                 "additional view 2: from 2026-10-14 00:01, attempt 2, graded 0-50%: grade; all questions with "
+                 "answers, responses; a message",
+                 '"IsAutoSetGraded": true'],
+            lacks=["Submission views, if students"])
+        for bad, why in [("    questions: some\n", "questions: is none, all, incorrect or correct"),
+                         ("    colour: red\n", "has colour; the primary view takes grade"),
+                         ("    grade: maybe\n", "grade: is true or false")]:
+            t = pathlib.Path(qdir / "bad-view.yml")
+            t.write_text(q27.read_text().replace("  primary_view:\n    questions: none\n", "  primary_view:\n" + bad))
+            run("setup-quiz", str(t), ok=False, has=[why])
+        for old_line, new_line, why in [
+                ("  - from: 12:30\n", "  - attempt: 1\n", "has no from:"),
+                ("    attempt: 2\n    grades: 0-50\n", "    grades: 0-50\n", "grades: narrows attempt:"),
+                ("    attempt: 2\n", "    attempt: 3\n", "attempt: 3, and the quiz allows 2 attempts"),
+                ("    grades: 0-50\n", "    grades: 50-20\n", "grades: is a range of percents")]:
+            t = pathlib.Path(qdir / "bad-view.yml")
+            t.write_text(q27.read_text().replace(old_line, new_line, 1))
+            run("setup-quiz", str(t), ok=False, has=[why])
+        t = pathlib.Path(qdir / "bad-view.yml")
+        t.write_text(q27.read_text().replace("  date: 2026-10-13\n", "").replace("  start: 12:30\n", "  start: 2026-10-13 12:30\n")
+                     .replace("  end: 14:00\n", "  end: 2026-10-13 14:00\n"))
+        run("setup-quiz", str(t), ok=False, has=["from: 12:30 is a time of day, and the quiz has no date:"])
+        # The views command: a quiz's views as YAML, and written from a quiz file's
+        # block onto a quiz that is already there, then read back the same way.
+        run("views", "240", "2", has=["auto_publish:", "  primary_view:", "    questions: none", "  additional_views: []"])
+        run("views", "240", "2", str(q27),
+            has=["primary view: grade; no questions", "additional view 2: from 2026-10-14 00:01, attempt 2, graded 0-50%",
+                 "in place of the additional views it has", "nothing sent; --go writes them"])
+        fails += len(HM_VIEWS[(OU, 2)]) != 1
+        run("views", "240", "2", str(q27), "--go",
+            has=["checked on the server: primary view, additional views, additional view 1, additional view 2"])
+        run("views", "240", "2",
+            has=["  - from: 2026-10-13 12:30\n    attempt: 1\n    minutes: 10\n    questions: all",
+                 "  - from: 2026-10-14 00:01\n    attempt: 2\n    grades: 0-50\n    questions: all\n    answers: true",
+                 "      <p>See <strong>Class 9</strong>.</p>"])
+        q27b = pathlib.Path(qdir / "q27b.yml")
+        q27b.write_text(q27.read_text().replace("  additional_views:\n", "  additional_views: []\n  ignored:\n"))
+        q27b.write_text(re.sub(r"  ignored:\n(?:  [- ] .*\n|      .*\n)*", "", q27b.read_text()))
+        run("views", "240", "2", str(q27b), "--go", has=["and no additional views: those it has are deleted",
+                                                         "checked on the server: primary view, additional views"])
+        fails += len(HM_VIEWS[(OU, 2)]) != 1
+        print("   additional views deleted:", len(HM_VIEWS[(OU, 2)]) == 1)
         # The questions' order and how many to a page, in the payload that makes the quiz.
         run("setup-quiz", quiz_yml("q26.yml", name="Quiz 26", shuffle_questions="true", paging="1"),
             has=["questions shuffled; 1 question per page", '"Shuffle": true', '"PagingTypeId": 1'])
