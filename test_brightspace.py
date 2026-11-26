@@ -2093,4 +2093,25 @@ if COOKIES_OK and yaml:
 run("logout", has=["forgot the session"])
 assert not (state / "session.json").exists()
 run("whoami", ok=False, has=["no session"])
+# copy-quiz's LockDown step: the settings read off the shell's quiz as the flags
+# that give a copy the same, and the Respondus form compared whole.
+import importlib.util
+spec_ = importlib.util.spec_from_file_location("bs_lockdown", SCRIPT)
+bs_ = importlib.util.module_from_spec(spec_); spec_.loader.exec_module(bs_)
+got_ = {"required": True, "allow": True, "domains": "a.org,\nb.edu", "monitor": "required", "second_camera": True,
+        "lab": True, "password": "pw", "lock_in": True, "calculator": "scientific", "steps": ["photo"], "face": [],
+        "form": {"enableCalc": [True, "Enable Calculator on the toolbar"], "enablePrint": [False, "Enable Printing"]}}
+argv_ = bs_.lockdown_argv(4207253, 3390287, got_)
+want_ = ["lockdown", "4207253", "3390287", "--go", "--domains", "a.org, b.edu", "--lock-in", "--calculator", "scientific",
+         "--lockdown-password", "pw", "--monitor", "--second-camera", "--proctored-lab", "--monitor-steps", "photo",
+         "--face-detection", "none"]
+other_ = dict(got_, form={"enableCalc": [True, "Enable Calculator on the toolbar"], "enablePrint": [True, "Enable Printing"]})
+checks_ = [argv_ == want_,
+           bs_.lockdown_argv(1, 2, {"required": True, "monitor": "not required"})[-1] == "--no-monitor",
+           bs_.lockdown_differences(got_, got_) == [],
+           bs_.lockdown_differences(got_, other_) == ["Enable Printing"],
+           bs_.lockdown_differences(dict(got_, form={"liveProctoringCode": ["a", ""]}),
+                                    dict(got_, form={"liveProctoringCode": ["b", ""]})) == []]
+print(("ok  " if all(checks_) else "FAIL") + " copy-quiz's LockDown flags and form comparison", checks_)
+fails += not all(checks_)
 print("FAILURES:", fails); sys.exit(1 if fails else 0)

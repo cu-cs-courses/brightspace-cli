@@ -528,7 +528,15 @@ def read_lockdown(p):
                         password: ({PASSWORD} || {{}}).value || '',
                         steps: {json.dumps(STEPS)}, face: {json.dumps(FACE)},
                         system: (findAll(e => e.tagName === 'SELECT' && e.id === 'liveProctoringSystem')[0] || {{}}).value || '',
-                        code: (findAll(e => e.tagName === 'INPUT' && e.id === 'liveProctoringCode')[0] || {{}}).value || ''}})""")
+                        code: (findAll(e => e.tagName === 'INPUT' && e.id === 'liveProctoringCode')[0] || {{}}).value || '',
+                        form: Object.fromEntries(findAll(e => /^(INPUT|SELECT|TEXTAREA)$/.test(e.tagName) && (e.id || e.name) &&
+                                                       !/^(hidden|submit|button|reset)$/.test(e.type))
+                          .map(e => [(e.id || e.name).replace(/_[0-9a-f]{{32}}$/, ''),
+                                     [e.type === 'checkbox' || e.type === 'radio' ? e.checked : e.value,
+                                      ((e.labels && e.labels[0] && e.labels[0].innerText) || '').replace(/\\s+/g, ' ').trim().slice(0, 90)]]))}})""")
+    # form: every control on the settings page, its id less the quiz's own key, as
+    # [value, label], so that two quizzes' settings compare whole, those the
+    # verb has no flag for included.
     # the boxes' ids above, turned into the names of those ticked
     for key in ("steps", "face"):
         got[key] = [n for n, i in got[key].items() if p.b.eval(f"!!({BOX.format(json.dumps(i))} || {{}}).checked")]

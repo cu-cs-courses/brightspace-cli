@@ -3135,6 +3135,23 @@ def cmd_copy_quiz(args):
         print(f"  into {label}: " + (f"attached to its grade item {item['Name']!r}" if item else
                                      f"attached to a new grade item {name!r}, shaped like {like['Name']!r}" if like else
                                      f"no grade item, since it has none called {name!r}; --item-like makes one"))
+    # LockDown Browser's settings are Respondus's, and a course copy does not
+    # bring them (Artem, 2026-11-26). So they are read off the shell's quiz here,
+    # before anything is copied or --clear deletes it, and written onto each copy.
+    ldb, why = None, drive_unready(s)
+    if why:
+        if RESPONDUS_SUFFIX.search(name):
+            print(f"  LockDown Browser: the shell's quiz requires it, and bs-drive cannot carry its settings "
+                  f"here ({why}); each copy's are set by hand")
+    else:
+        ldb = drive_read_lockdown(s, shell.ou, str(q["QuizId"]))
+        if ldb is None:
+            raise Failed(f"bs-drive could not read {name!r}'s LockDown settings in {args.shell}; nothing has been copied")
+        if ldb.get("required"):
+            print(f"  LockDown Browser required: {lockdown_line(ldb)}; written onto each copy, and read back")
+        else:
+            print("  LockDown Browser not required in the shell, so there are no settings to carry")
+            ldb = None
     if not args.go:
         print("\n  nothing sent; --go copies it")
         return
@@ -3161,6 +3178,14 @@ def cmd_copy_quiz(args):
                 payload = quiz_update_payload(quiz_detail(s, dest.ou, str(qid)))
                 payload |= {"GradeItemId": item["Id"], "AutoExportToGrades": True}
                 s.send("PUT", f"/d2l/api/le/{le}/{dest.ou}/quizzes/{qid}", payload)
+            lockdown = []
+            if ldb:
+                # Before the name is compared: Respondus renames a quiz it guards.
+                written = drive(s, *lockdown_argv(dest.ou, qid, ldb))
+                got = drive_read_lockdown(s, dest.ou, str(qid)) if written else None
+                left = lockdown_differences(ldb, got) if got else ["(not read)"]
+                lockdown = [("LockDown settings", "the shell's", "the shell's" if written and not left else
+                             "not written" if not written else "different in " + "; ".join(left))]
             back = quiz_detail(s, dest.ou, str(qid))
             views = [QuizViews(s, o, i).read_all() for o, i in ((shell.ou, q["QuizId"]), (dest.ou, qid))]
             same = (same_view(views[0][0], views[1][0]) and len(views[0][1]) == len(views[1][1])
@@ -3173,7 +3198,7 @@ def cmd_copy_quiz(args):
                           ("questions", questions, len(quiz_questions(s, dest.ou, qid))),
                           ("shown", q.get("IsActive"), back.get("IsActive")),
                           ("dates", dates, (back.get("StartDate"), back.get("EndDate"), back.get("DueDate"))),
-                          ("submission views", True, same)]
+                          ("submission views", True, same)] + lockdown
                          + ([("grade item", item["Id"], back.get("GradeItemId"))] if item else []), "copied")
         except Failed as e:
             failed.append(label)
@@ -4361,6 +4386,65 @@ def same_html(a, b):
         return re.sub(r'style="([^"]*)"', lambda m: 'style="' + re.sub(r"\s*([:;])\s*", r"\1", m[1]).strip() + '"',
                       t).strip()
     return norm(a) == norm(b)
+
+
+def lockdown_argv(ou, quiz, got):
+    """bs-drive's lockdown argv that gives a quiz the LockDown settings got, as
+    drive_read_lockdown reads them off another: copy-quiz's, for each copy."""
+    argv = ["lockdown", str(ou), str(quiz), "--go"]
+    if got.get("allow") and (got.get("domains") or "").strip():
+        argv += ["--domains", ", ".join(d.strip() for d in re.split(r"[,\n]", got["domains"]) if d.strip())]
+    argv += ["--lock-in" if got.get("lock_in") else "--no-lock-in", "--calculator", got.get("calculator") or "none"]
+    if got.get("password"):
+        argv += ["--lockdown-password", got["password"]]
+    if got.get("monitor") == "required":
+        argv += ["--monitor", "--second-camera" if got.get("second_camera") else "--no-second-camera",
+                 "--proctored-lab" if got.get("lab") else "--no-proctored-lab",
+                 "--monitor-steps", ", ".join(got.get("steps") or []) or "none",
+                 "--face-detection", ", ".join(got.get("face") or []) or "none"]
+    elif got.get("monitor") == "live proctoring":
+        argv += ["--live-proctoring", got.get("system") or "other"] + (["--live-code", got["code"]] if got.get("code") else [])
+    else:
+        argv.append("--no-monitor")
+    return argv
+
+
+def lockdown_line(got):
+    """The LockDown settings drive_read_lockdown read, in a line."""
+    n = len([d for d in re.split(r"[,\n]", got.get("domains") or "") if d.strip()]) if got.get("allow") else 0
+    parts = [f"{n} site{'s' if n != 1 else ''} allowed" if n else "no other site allowed"]
+    parts += (["students locked in until done"] if got.get("lock_in") else [])
+    parts += ([f"a {got['calculator']} calculator"] if got.get("calculator") not in (None, "none") else [])
+    parts += (["an exam password"] if got.get("password") else [])
+    if got.get("monitor") == "required":
+        parts.append("Respondus Monitor" + (", with a second camera" if got.get("second_camera") else "")
+                     + (", or in a proctored lab" if got.get("lab") else ""))
+    elif got.get("monitor") == "live proctoring":
+        parts.append(f"live proctoring over {(got.get('system') or 'other').title()}")
+    return ", ".join(parts)
+
+
+# Respondus Monitor's own controls, which do nothing unless Monitor is required:
+# its startup steps, face detection, the second camera, the proctored lab.
+MONITOR_ONLY = {"FACE_PIC_CHECK_ENABLED", "ID_CHECK_ENABLED", "ENV_CHECK_ENABLED", "ADDITIONAL_INSTRUCTIONS_ENABLED",
+                "VIDEO_GUIDELINES_ENABLED", "forceFacialDetection", "notifyFacialDetectionLoss",
+                "secondCameraEnabled", "monitorOptional"}
+
+
+def lockdown_differences(a, b):
+    """The labels of the Respondus settings in effect on which two forms differ:
+    live proctoring's only when a uses it, and Monitor's only when a requires it,
+    since a page keeps what was typed there before another choice was made."""
+    mode = (a or {}).get("monitor")
+    fa, fb = (a or {}).get("form") or {}, (b or {}).get("form") or {}
+    def counts(k):
+        if k.startswith("liveProctoring"):
+            return mode == "live proctoring"
+        if k in MONITOR_ONLY or k.startswith("d_"):
+            return mode == "required"
+        return True
+    return sorted({(fa.get(k) or fb.get(k))[1] or k for k in set(fa) | set(fb)
+                   if counts(k) and (fa.get(k) or [None])[0] != (fb.get(k) or [None])[0]})
 
 
 def drive_read_lockdown(s, ou, name):

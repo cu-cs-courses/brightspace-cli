@@ -608,7 +608,17 @@ questions, its dates and whether it is shown, and drops its link to a grade
 item without making one. So each section's copy is attached to that section's
 grade item of the quiz's own name, or, where there is none, to a new one
 shaped like `--item-like`'s, which `previous` makes the item of the quiz
-numbered before it; without either it has none. It stops before
+numbered before it; without either it has none. A copy does not bring the
+quiz's LockDown Browser settings, which are Respondus's (Artem, 2026-11-26), so
+where the shell's quiz requires LockDown its settings are read off it before
+anything is copied and written onto each copy by
+[`extras/bs-drive/`](extras/bs-drive/README.md): the sites, the exam password,
+the lock-in and the calculator, Monitor with its steps, face detection, second
+camera and proctored lab, or live proctoring. Each copy's whole Respondus form
+is then compared with the shell's, so a setting the verb has no flag for, if it
+differs, is named in the copy's checks rather than lost; live proctoring's
+fields count only where the shell uses it, and Monitor's only where it
+requires it. Without a browser it says each copy's are to be set by hand. It stops before
 copying anything if the shell has students or holds any number of quizzes but
 one, or if a section already has a quiz of that name, and it deletes nothing:
 with `--clear`, the shell's quiz goes once every section has its copy, which
