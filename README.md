@@ -457,7 +457,8 @@ from the quiz `like` names, or else from the one numbered before it, `Quiz 5`
 for `Quiz 6`, or else from the course's last quiz.
 
 **LockDown, Respondus Monitor and visibility are keys of the block**,
-`lockdown`, `lockdown_domains`, `lockdown_password` (LockDown's own), `monitor` (the webcam, which takes LockDown),
+`lockdown`, `lockdown_domains`, `lockdown_password` (LockDown's own), `lockdown_lock_in`,
+`lockdown_calculator`, `monitor` (the webcam, which takes LockDown),
 `second_camera`, `proctored_lab`, `monitor_steps` and `face_detection` (which take Monitor),
 `live_proctoring` and `live_proctoring_code` (an instructor over Zoom and the
 like, instead of Monitor) and `visible`, flags of the same names, and `--go` takes

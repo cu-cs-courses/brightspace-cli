@@ -90,7 +90,12 @@ Advanced Settings, `monitorOptional_` and the quiz's key; it implies
 (`testPassword`) from optional to required, and a Save without one keeps the
 box unticked and says nothing (2026-11-25), so the verb refuses it unless the
 field holds a password or `--lockdown-password PW` gives one. That password is
-Respondus's own: Brightspace's quiz password reads none beside it. Without any of these, proctoring is left as it is; the readback, and
+Respondus's own: Brightspace's quiz password reads none beside it.
+`--lock-in` ticks LockDown's own *Lock students into the browser until exam is
+completed* (`lockIntoLDB`), and `--calculator standard`, `scientific` or `none`
+its *Enable Calculator on the toolbar* (`enableCalc`, then the `calcType` radio,
+`basicCalc` or `scientificCalc`), both under LockDown's Advanced Settings.
+Without any of these, proctoring is left as it is; the readback, and
 `--json`, carry all of it either way. Switching a quiz to live proctoring
 resets Monitor's startup steps to Respondus's own, every one on (2026-11-25),
 so a quiz going back to Monitor names its steps again.

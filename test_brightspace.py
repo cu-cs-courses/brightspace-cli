@@ -1517,6 +1517,8 @@ if COOKIES_OK:
                            "proctored_lab: is Respondus Monitor's"),
                           ({"proctored_lab": "true"}, "proctored_lab: needs lockdown_password:"),
                           ({"lockdown_password": "x", "lockdown": "false"}, "lockdown_password: is LockDown Browser's"),
+                          ({"lockdown_calculator": "graphing"}, "lockdown_calculator: is standard, scientific or none"),
+                          ({"lockdown_lock_in": "true", "lockdown": "false"}, "lockdown_lock_in: is LockDown Browser's"),
                           ({"proctored_lab": "true", "live_proctoring": "zoom"}, "proctored_lab:, monitor_steps:")]:
             run("setup-quiz", quiz_yml("bad.yml", **({"name": "Quiz 16"} | keys)), ok=False, has=[why],
                 lacks=["Traceback"])
@@ -1621,6 +1623,11 @@ if COOKIES_OK:
             has=["questions shuffled; 1 question per page", '"Shuffle": true', '"PagingTypeId": 1'])
         run("setup-quiz", quiz_yml("q26.yml", name="Quiz 26", paging="Sections"), "--no-shuffle-questions",
             has=["questions in order; a page break after each section", '"Shuffle": false', '"PagingTypeId": 2'])
+        # LockDown's calculator and its lock-in, under its Advanced Settings.
+        run("setup-quiz", quiz_yml("q29.yml", name="Quiz 29", lockdown_lock_in="true", lockdown_calculator="Scientific"),
+            has=["LockDown Browser required, no other site allowed, students locked in until done, a scientific calculator",
+                 "Require LockDown Browser; Advanced Settings -> lock students into the browser until exam is "
+                 "completed; Advanced Settings -> Enable Calculator on the toolbar, scientific"])
         # Unlimited attempts: null to the API, IsUnlimited when read back.
         run("setup-quiz", quiz_yml("q25.yml", name="Quiz 25", attempts="unlimited"),
             has=["8 minutes, unlimited attempts", '"NumberOfAttemptsAllowed": null'])
