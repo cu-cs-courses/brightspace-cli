@@ -1054,6 +1054,8 @@ if COOKIES_OK:
     run("set-quiz", "240", "Midterm Part 1", "--header", str(header),
         has=["header: 0 chars -> ", "chars, displayed", "checked on the server: header, StartDate"])
     run("new-quiz", "240", "Whatever", "--ip", "nonsense", ok=False, has=["wants a range like"])
+    run("set-quiz", "240", "Quiz 1", "--minutes", "none", "--dry-run",
+        has=["time limit: 50 minutes recommended -> none", "--dry-run: nothing sent"])
     run("new-quiz", "240", "Whatever", "--attempts", "lots", ok=False, has=["attempts: is a whole number, or unlimited"])
     run("new-quiz", "240", "Ten to a page", "--paging", "10", "--shuffle-questions",
         has=['"PagingTypeId": 4', '"Shuffle": true', "questions shuffled, paging"])
@@ -1610,6 +1612,10 @@ if COOKIES_OK:
                                                          "checked on the server: primary view, additional views"])
         fails += len(HM_VIEWS[(OU, 2)]) != 1
         print("   additional views deleted:", len(HM_VIEWS[(OU, 2)]) == 1)
+        # No time limit is 0 minutes, not enforced: the copied quiz's value kept with
+        # the timer off is a recommended limit, which students are shown.
+        run("setup-quiz", quiz_yml("q28.yml", name="Quiz 28", minutes="none"),
+            has=["no time limit", '"IsEnforced": false', '"TimeLimitValue": 0'], lacks=['"TimeLimitValue": 8'])
         # The questions' order and how many to a page, in the payload that makes the quiz.
         run("setup-quiz", quiz_yml("q26.yml", name="Quiz 26", shuffle_questions="true", paging="1"),
             has=["questions shuffled; 1 question per page", '"Shuffle": true', '"PagingTypeId": 1'])

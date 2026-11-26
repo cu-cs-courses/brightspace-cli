@@ -1692,8 +1692,7 @@ def cmd_quiz(args):
         ("starts", local(q.get("StartDate")) or "no start date"),
         ("ends", local(q.get("EndDate")) or "no end date"),
         ("due", local(q.get("DueDate")) or "no due date"),
-        ("time limit", (lambda on, m: f"{m} minutes" if on else "none")(*limit_of(
-                           q.get("SubmissionTimeLimit") if isinstance(q.get("SubmissionTimeLimit"), dict) else None))),
+        ("time limit", limit_text(q.get("SubmissionTimeLimit") if isinstance(q.get("SubmissionTimeLimit"), dict) else None)),
         ("grade item", q.get("GradeItemId") or "not attached to the gradebook"),
         ("category", q.get("CategoryId") or "none"),
         ("shuffled", yes_no(q.get("Shuffle"))),
@@ -2351,8 +2350,7 @@ def cmd_set_quiz(args):
         # more, which the input form only takes as the whole limit.
         had = before.get("SubmissionTimeLimit") if isinstance(before.get("SubmissionTimeLimit"), dict) else {}
         if no_limit(args.minutes):
-            limit = {"IsEnforced": False, "ShowClock": False,
-                     "TimeLimitValue": int((had or {}).get("TimeLimitValue") or 120)}
+            limit = dict(NO_LIMIT)
         else:
             limit = {"IsEnforced": True, "ShowClock": True, "TimeLimitValue": int(args.minutes)}
         if limit_of(had) != limit_of(limit):
@@ -2398,7 +2396,7 @@ def cmd_set_quiz(args):
     print(f"{before['Name']!r} (id {before['QuizId']})")
     for key, value in changed.items():
         if key == "SubmissionTimeLimit":
-            print(f"  time limit: {limit_of(before.get(key))} -> {limit_of(value)}  (enforced, minutes)")
+            print(f"  time limit: {limit_text(before.get(key))} -> {limit_text(value)}")
         elif key == "Description":
             print(f"  description: {text_of((before.get(key) or {}).get('Text'))[:60]!r}… -> "
                   f"{text_of(value['Text'])[:60]!r}…")
@@ -2436,10 +2434,25 @@ def no_limit(minutes):
     return minutes is not None and str(minutes).strip().lower() == "none"
 
 
+# No time limit, as the server holds one: not enforced, and 0 minutes. Not
+# enforced with minutes above 0 is a recommended time limit, which students are
+# shown: what Julia's Practice Final Exam Quiz got on 2026-11-25 from minutes:
+# none, which kept the 12 of the quiz it copied. The editor's own API says
+# notimelimit for 0 and recommended for 12; 120's Progress Exam 1 has the 0.
+NO_LIMIT = {"IsEnforced": False, "ShowClock": False, "TimeLimitValue": 0}
+
+
 def limit_of(limit):
-    """A quiz's time limit as (enforced, minutes), whichever shape it comes in."""
+    """A quiz's time limit as (enforced, minutes), whichever shape it comes in:
+    minutes is None for no limit, and a number not enforced is recommended."""
     limit = limit or {}
-    return (bool(limit.get("IsEnforced")), limit.get("TimeLimitValue") if limit.get("IsEnforced") else None)
+    return (bool(limit.get("IsEnforced")), limit.get("TimeLimitValue") or None)
+
+
+def limit_text(limit):
+    """A time limit as a person reads it: 12 minutes, 12 minutes recommended, none."""
+    on, minutes = limit_of(limit)
+    return f"{minutes} minutes" + ("" if on else " recommended") if minutes else "none"
 
 
 def cmd_new_quiz(args):
@@ -2527,11 +2540,9 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
         if as_flag(getattr(args, flag, None)) is not None:
             payload[field] = as_flag(getattr(args, flag))
     if no_limit(args.minutes):
-        # No timer, whatever the template had: the value stays, since the API
-        # wants one, and IsEnforced off is what "no time limit" is on the server.
-        had = payload.get("SubmissionTimeLimit") if isinstance(payload.get("SubmissionTimeLimit"), dict) else {}
-        payload["SubmissionTimeLimit"] = {"IsEnforced": False, "ShowClock": False,
-                                          "TimeLimitValue": int((had or {}).get("TimeLimitValue") or 120)}
+        # No timer, whatever the template had: 0 minutes, not enforced. The
+        # template's value kept with IsEnforced off is a recommended limit.
+        payload["SubmissionTimeLimit"] = dict(NO_LIMIT)
     elif args.minutes is not None:
         payload["SubmissionTimeLimit"] = {"IsEnforced": True, "ShowClock": True,
                                           "TimeLimitValue": int(args.minutes)}
@@ -4163,11 +4174,11 @@ def check_quiz(s, ou, plan, by_hand=False):
                 row(key.replace("_", " "), str(as_flag(plan[key])).lower(), str(bool(q.get(field))).lower(),
                     as_flag(plan[key]) == bool(q.get(field)))
         on, minutes = limit_of(q.get("SubmissionTimeLimit"))
+        have = limit_text(q.get("SubmissionTimeLimit")).replace("none", "(none)")
         if no_limit(plan.get("minutes")):
-            row("time limit", "(none)", f"{minutes} minutes" if on else "(none)", not on)
+            row("time limit", "(none)", have, not minutes)
         else:
-            row("time limit", f"{plan['minutes']} minutes" if "minutes" in plan else "-",
-                f"{minutes} minutes" if on else "(none)",
+            row("time limit", f"{plan['minutes']} minutes" if "minutes" in plan else "-", have,
                 "minutes" not in plan or (on and str(minutes) == plan["minutes"]))
         row("attempts", str(plan.get("attempts", "1")).lower(), attempts_of(q))
         if "shuffle_questions" in plan:
