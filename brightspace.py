@@ -3227,8 +3227,8 @@ def cmd_setup(args):
 # A quiz's keys: its brightspace: block, and setup-quiz's flags of the same names.
 QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
              "points", "grade_item", "description", "shell", "calendar", "special_access_only",
-             "lockdown", "lockdown_domains", "monitor", "second_camera", "monitor_steps", "face_detection",
-             "live_proctoring", "live_proctoring_code", "visible")
+             "lockdown", "lockdown_domains", "lockdown_password", "monitor", "second_camera", "proctored_lab",
+             "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code", "visible")
 # Respondus Monitor's startup steps that can be left out, face detection's two
 # options, and live proctoring's video systems: bs-drive's names for them.
 MONITOR_STEPS = ("instructions", "guidelines", "photo", "id", "environment")
@@ -3293,7 +3293,7 @@ def check_value(key, value, at):
     if key in ("minutes", "attempts") and not re.fullmatch(r"[1-9]\d*", value):
         raise Failed(f"{at} {key}: is a whole number, not {value!r}"
                      + (" -- or none, for a quiz with no time limit" if key == "minutes" else ""))
-    if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "visible") \
+    if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "proctored_lab", "visible") \
             and value.strip().lower() not in TRUTH | FALSITY:
         raise Failed(f"{at} {key}: is true or false, not {value!r}")
     for name, known in (("monitor_steps", MONITOR_STEPS), ("face_detection", FACE_OPTIONS)):
@@ -3308,6 +3308,8 @@ def check_value(key, value, at):
                      f"{', '.join(LIVE_SYSTEMS)}, not {value!r}; monitor: false turns proctoring off")
     if key == "live_proctoring_code" and not value.strip():
         raise Failed(f"{at} live_proctoring_code: is the start code students are given, and is empty")
+    if key == "lockdown_password" and not value.strip():
+        raise Failed(f"{at} lockdown_password: is LockDown Browser's password to access the exam, and is empty")
     if key == "lockdown_domains":
         hosts = domain_list(value)
         bad = [h for h in hosts if not HOST.fullmatch(h)]
@@ -3457,8 +3459,8 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         plan["item"] = True
     plan["used"] = used
     for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only",
-                "lockdown", "lockdown_domains", "monitor", "second_camera", "monitor_steps", "face_detection",
-                "live_proctoring", "live_proctoring_code", "visible"):
+                "lockdown", "lockdown_domains", "lockdown_password", "monitor", "second_camera", "proctored_lab",
+                "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code", "visible"):
         if key in plan:
             check_value(key, plan[key], at)
     if "lockdown_domains" in plan:
@@ -3469,10 +3471,11 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         plan.setdefault("lockdown", "true")
     # Respondus Monitor, the webcam, runs inside LockDown Browser, and a second camera
     # is Monitor's: each asks for the one before it, and refuses its being turned off.
-    if "second_camera" in plan and as_flag(plan["second_camera"]):
-        if "monitor" in plan and not as_flag(plan["monitor"]):
-            raise Failed(f"{at} second_camera: is Respondus Monitor's, and monitor: false turns Monitor off")
-        plan.setdefault("monitor", "true")
+    for key in ("second_camera", "proctored_lab"):
+        if key in plan and as_flag(plan[key]):
+            if "monitor" in plan and not as_flag(plan["monitor"]):
+                raise Failed(f"{at} {key}: is Respondus Monitor's, and monitor: false turns Monitor off")
+            plan.setdefault("monitor", "true")
     for key in ("monitor_steps", "face_detection"):
         if key in plan:
             if "monitor" in plan and not as_flag(plan["monitor"]):
@@ -3484,10 +3487,20 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     if "live_proctoring" in plan:
         if "monitor" in plan and as_flag(plan["monitor"]):
             raise Failed(f"{at} live_proctoring: is instead of Respondus Monitor, and the plan has Monitor "
-                         "(monitor:, second_camera:, monitor_steps: or face_detection:)")
+                         "(monitor:, second_camera:, proctored_lab:, monitor_steps: or face_detection:)")
         plan["live_proctoring"] = plan["live_proctoring"].strip().lower()
         if "lockdown" in plan and not as_flag(plan["lockdown"]):
             raise Failed(f"{at} live_proctoring: runs inside LockDown Browser, and lockdown: false turns it off")
+        plan.setdefault("lockdown", "true")
+    # The proctored lab, a sitting with a person in the room instead of the webcam,
+    # needs LockDown Browser's own exam password, which the proctor types in:
+    # Respondus will not save the box without one. The password is LockDown's.
+    if as_flag(plan.get("proctored_lab")) and "lockdown_password" not in plan:
+        raise Failed(f"{at} proctored_lab: needs lockdown_password:, the password the lab's proctor types in; "
+                     "Respondus will not save a proctored lab without one")
+    if "lockdown_password" in plan:
+        if "lockdown" in plan and not as_flag(plan["lockdown"]):
+            raise Failed(f"{at} lockdown_password: is LockDown Browser's, and lockdown: false turns it off")
         plan.setdefault("lockdown", "true")
     if "live_proctoring_code" in plan and "live_proctoring" not in plan:
         raise Failed(f"{at} live_proctoring_code: is live proctoring's start code, and the plan has no live_proctoring:")
@@ -3574,7 +3587,8 @@ def quiz_summary(plan, template=None):
     if "lockdown" in plan:
         n = len(domain_list(plan.get("lockdown_domains")))
         extras.append(("LockDown Browser required, " + (f"{n} site{'s' if n != 1 else ''} allowed" if n
-                                                        else "no other site allowed"))
+                                                        else "no other site allowed")
+                       + (f", exam password {plan['lockdown_password']}" if "lockdown_password" in plan else ""))
                       if as_flag(plan["lockdown"]) else "LockDown Browser not required")
     if "live_proctoring" in plan:
         extras.append(f"live proctoring over {plan['live_proctoring'].title()}"
@@ -3582,6 +3596,7 @@ def quiz_summary(plan, template=None):
     elif "monitor" in plan:
         extras.append(("Respondus Monitor required" + (", with a second camera" if as_flag(plan.get("second_camera"))
                                                        else "")
+                       + (", or in a proctored lab" if as_flag(plan.get("proctored_lab")) else "")
                        + (f", startup steps: {plan['monitor_steps']}" if "monitor_steps" in plan else "")
                        + (f", face detection: {plan['face_detection']}" if "face_detection" in plan else ""))
                       if as_flag(plan["monitor"]) else "Respondus Monitor not required")
@@ -3630,11 +3645,15 @@ def quiz_remainder(plan, template, shown, done=()):
                                                        "; Monitor's Second Camera -> not required"
                                                        if "second_camera" in plan else "")
                        if as_flag(plan["monitor"]) else "; Don't require Respondus Monitor")
+            if as_flag(plan["monitor"]) and "proctored_lab" in plan:
+                monitor += ("; Monitor's Advanced Settings -> " + ("" if as_flag(plan["proctored_lab"]) else "don't ")
+                            + "allow this exam to additionally be delivered in a proctored lab")
             if as_flag(plan["monitor"]) and "monitor_steps" in plan:
                 monitor += f"; Startup Sequence: on, {plan['monitor_steps']}, the rest off"
             if as_flag(plan["monitor"]) and "face_detection" in plan:
                 monitor += f"; Face Detection Options: on, {plan['face_detection']}, the rest off"
-        steps.append(("LockDown Browser tab -> the quiz's row -> Settings -> Require LockDown Browser" + monitor
+        password = (f"; Password to access exam: {plan['lockdown_password']}" if "lockdown_password" in plan else "")
+        steps.append(("LockDown Browser tab -> the quiz's row -> Settings -> Require LockDown Browser" + password + monitor
                       + (f"; Advanced Settings -> allow access to external domains, one line with commas:\n"
                          f"    {plan['lockdown_domains']}" if plan.get("lockdown_domains") else ".")
                       ) if as_flag(plan["lockdown"]) else
@@ -3731,6 +3750,8 @@ def check_quiz(s, ou, plan, by_hand=False):
                 if as_flag(plan["lockdown"]):
                     have = (got.get("domains") or "") if got.get("allow") else ""
                     row("LockDown sites", plan.get("lockdown_domains") or "(none)", have or "(none)")
+                    if "lockdown_password" in plan:
+                        row("exam password", plan["lockdown_password"], got.get("password") or "(none)")
                 if "live_proctoring" in plan or "monitor" in plan:
                     row("proctoring", "live proctoring" if "live_proctoring" in plan else
                         "Respondus Monitor" if as_flag(plan["monitor"]) else "none",
@@ -3747,6 +3768,8 @@ def check_quiz(s, ou, plan, by_hand=False):
                         row(what, ", ".join(want) or "none", ", ".join(have) or "none", want == have)
                 if "second_camera" in plan:
                     row("second camera", yes_no(as_flag(plan["second_camera"])), yes_no(got.get("second_camera")))
+                if "proctored_lab" in plan:
+                    row("proctored lab", yes_no(as_flag(plan["proctored_lab"])), yes_no(got.get("lab")))
     if plan["csv_state"]:
         row(plan["csv"].name, "current", plan["csv_state"])
     table(["", "the plan says", "Brightspace has", ""], rows)
@@ -3812,9 +3835,12 @@ def drive_steps(plan, ou):
         if as_flag(plan["lockdown"]):
             steps.append(("lockdown", ["lockdown", str(ou), plan["name"], "--go"]
                           + (["--domains", plan["lockdown_domains"]] if plan.get("lockdown_domains") else [])
+                          + (["--lockdown-password", plan["lockdown_password"]] if "lockdown_password" in plan else [])
                           + ([("--" if as_flag(plan["monitor"]) else "--no-") + "monitor"] if "monitor" in plan else [])
                           + ([("--" if as_flag(plan["second_camera"]) else "--no-") + "second-camera"]
                              if "second_camera" in plan else [])
+                          + ([("--" if as_flag(plan["proctored_lab"]) else "--no-") + "proctored-lab"]
+                             if "proctored_lab" in plan else [])
                           + (["--monitor-steps", plan["monitor_steps"]] if "monitor_steps" in plan else [])
                           + (["--face-detection", plan["face_detection"]] if "face_detection" in plan else [])
                           + (["--live-proctoring", plan["live_proctoring"]] if "live_proctoring" in plan else [])
@@ -3947,6 +3973,9 @@ def cmd_setup_quiz(args):
               item_hint=("a shell's has nowhere to send scores; each copy goes to its section's" if shell else
                          "the plan says grade_item: none" if not plan["item"] else
                          "--go attaches the one made above, which a plan cannot name"))
+    if args.go and ("lockdown_password" in plan or "live_proctoring_code" in plan):
+        refuse_student_names(s, ou, f"the quiz {plan['name']!r}'s exam password or start code",
+                             plan.get("lockdown_password"), plan.get("live_proctoring_code"))
     why = drive_unready(s, args.by_hand)
     steps = [] if why else drive_steps(plan, ou)
     done = set()
@@ -4755,6 +4784,11 @@ def main(argv=None):
                    help="require Respondus Monitor, the webcam, or with --no-monitor not; it takes LockDown")
     x.add_argument("--second-camera", dest="second_camera", action=argparse.BooleanOptionalAction,
                    help="require a second camera, a phone, which is Monitor's")
+    x.add_argument("--proctored-lab", dest="proctored_lab", action=argparse.BooleanOptionalAction,
+                   help="also allow a sitting in a proctored lab, no webcam recording, which is Monitor's "
+                        "and needs --lockdown-password")
+    x.add_argument("--lockdown-password", dest="lockdown_password", metavar="PASSWORD",
+                   help="LockDown Browser's own password to access the exam, which a lab's proctor types in")
     x.add_argument("--monitor-steps", dest="monitor_steps", metavar="'instructions, environment'",
                    help="Monitor's startup steps on, the rest off: " + ", ".join(MONITOR_STEPS) + "; or none")
     x.add_argument("--face-detection", dest="face_detection", metavar="'block, notify'",

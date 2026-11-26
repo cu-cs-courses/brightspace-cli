@@ -7,7 +7,7 @@ a fresh load; without --go nothing is written.
 
     bs-drive.py header   COURSE QUIZ --header FILE [--footer FILE] [--go]
     bs-drive.py visible  COURSE QUIZ [--hidden] [--go]
-    bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--[no-]monitor] [--[no-]second-camera]
+    bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--[no-]monitor] [--[no-]second-camera] [--[no-]proctored-lab] [--lockdown-password PW]
                          [--monitor-steps LIST] [--face-detection LIST] [--live-proctoring SYSTEM --live-code CODE] [--go]
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
     bs-drive.py import   COURSE FILE.csv --section NAME [--go]
@@ -457,6 +457,15 @@ FACE = {"block": "forceFacialDetection", "notify": "notifyFacialDetectionLoss"}
 SYSTEMS = {"zoom": "ZOOM", "teams": "TEAMS", "google meet": "GOOGLEMEET", "collaborate": "BBCOLLABORATE",
            "webex": "WEBEX", "other": "OTHER"}
 BOX = "findAll(e => e.tagName === 'INPUT' && e.type === 'checkbox' && e.id === {})[0]"
+# Monitor's "Allow this exam to additionally be delivered in a proctored lab (no
+# webcam recording)", folded under its Advanced Settings: a sitting with a person
+# in the room instead of the recording. Its id ends in the quiz's own key.
+LAB = "findAll(e => e.tagName === 'INPUT' && e.type === 'checkbox' && e.id.startsWith('monitorOptional_'))[0]"
+# LockDown Browser's own "Password to access exam", under its Password Settings: not
+# the quiz's Brightspace password, which reads none beside it. Optional, until the
+# proctored lab is ticked, which Respondus will not save without one: the proctor
+# in the room types it in.
+PASSWORD = "findAll(e => e.tagName === 'INPUT' && e.id === 'testPassword')[0]"
 
 
 def names_list(text, known, what):
@@ -479,6 +488,8 @@ def read_lockdown(p):
                                           return !e ? null : e.id.startsWith('monitorEnabledTrue_') ? 'required'
                                                  : e.id.startsWith('liveProctoringEnabled_') ? 'live proctoring' : 'not required'; }})(),
                         second_camera: !!({SECOND} || {{}}).checked,
+                        lab: !!({LAB} || {{}}).checked,
+                        password: ({PASSWORD} || {{}}).value || '',
                         steps: {json.dumps(STEPS)}, face: {json.dumps(FACE)},
                         system: (findAll(e => e.tagName === 'SELECT' && e.id === 'liveProctoringSystem')[0] || {{}}).value || '',
                         code: (findAll(e => e.tagName === 'INPUT' && e.id === 'liveProctoringCode')[0] || {{}}).value || ''}})""")
@@ -489,7 +500,7 @@ def read_lockdown(p):
     return got
 
 
-def set_monitor(b, p, mode, second=None, steps=None, face=None, system=None, code=None):
+def set_monitor(b, p, mode, second=None, steps=None, face=None, system=None, code=None, lab=None):
     """Proctoring on the settings page as it stands, nothing saved: mode is "required"
     (Respondus Monitor), "not required", "live" (an instructor over a video system)
     or None to leave it; with Monitor the startup steps and face detection, each a
@@ -540,11 +551,22 @@ def set_monitor(b, p, mode, second=None, steps=None, face=None, system=None, cod
         b.click_xy(r["x"], r["y"]); b.insert(code); time.sleep(1)
         if b.eval(f"{CODE}.value") != code:
             sys.exit(f"the start code reads {b.eval(f'{CODE}.value')!r}, not {code!r}; nothing saved")
-    if second is not None:
+    after = ("(e.compareDocumentPosition(findAll(x => x.tagName === 'INPUT' && x.name === 'monitorEnabled')[0])"
+             " & Node.DOCUMENT_POSITION_PRECEDING)")
+    if lab is not None:
         # Folded under Monitor's own Advanced Settings, the link of that name after the
-        # Monitor radios (LockDown's comes first), and there under Second Camera.
-        after = ("(e.compareDocumentPosition(findAll(x => x.tagName === 'INPUT' && x.name === 'monitorEnabled')[0])"
-                 " & Node.DOCUMENT_POSITION_PRECEDING)")
+        # Monitor radios (LockDown's comes first).
+        if not shown(LAB):
+            p.click_pred(f"e => e.tagName === 'A' && (e.textContent || '').trim() === 'Advanced Settings' && "
+                         f"e.getBoundingClientRect().width > 0 && {after}", settle=2, must=False)
+        if not shown(LAB):
+            sys.exit("the box for a proctored lab is not on the screen; nothing saved")
+        if lab and not b.eval(f"({PASSWORD} || {{}}).value"):
+            sys.exit("a sitting in a proctored lab needs LockDown Browser's exam password, which the proctor types "
+                     "in, and Respondus will not save it without one: --lockdown-password; nothing saved")
+        tick(LAB, lab, "a proctored lab")
+    if second is not None:
+        # Folded under Monitor's own Advanced Settings and there under Second Camera.
         for link in ("Advanced Settings", "Second Camera"):
             if shown(SECOND):
                 break
@@ -565,13 +587,16 @@ def verb_lockdown(a):
     system = None if a.live_proctoring is None else a.live_proctoring.strip().lower()
     if system is not None and system not in SYSTEMS:
         sys.exit(f"--live-proctoring: {a.live_proctoring!r} is not one of {', '.join(SYSTEMS)}")
-    monitors = a.monitor or a.second_camera or steps is not None or face is not None
+    monitors = a.monitor or a.second_camera or a.proctored_lab or steps is not None or face is not None
     if a.off and (monitors or system):
         sys.exit("Respondus Monitor and live proctoring run inside LockDown Browser, so --off takes neither")
     if monitors and a.monitor is False:
-        sys.exit("--second-camera, --monitor-steps and --face-detection are Respondus Monitor's: not with --no-monitor")
+        sys.exit("--second-camera, --proctored-lab, --monitor-steps and --face-detection are Respondus Monitor's: "
+                 "not with --no-monitor")
     if system and monitors:
         sys.exit("live proctoring is instead of Respondus Monitor: --live-proctoring takes none of Monitor's flags")
+    if a.off and a.lockdown_password is not None:
+        sys.exit("--lockdown-password is LockDown Browser's, so --off takes none")
     if a.live_code is not None and not system:
         sys.exit("--live-code is live proctoring's start code: it takes --live-proctoring")
     mode = "live" if system else "required" if monitors else "not required" if a.monitor is False else None
@@ -587,7 +612,8 @@ def verb_lockdown(a):
         if a.json:
             print(json.dumps(have)); return
         print(f"now: required={have['required']} external domains allowed={have['allow']} domains={have['domains']!r} "
-              f"monitor={have['monitor']} second camera={have['second_camera']}"
+              f"monitor={have['monitor']} second camera={have['second_camera']} proctored lab={have['lab']}"
+              f" exam password={have['password']!r}"
               f" steps={','.join(have['steps']) or 'none'} face={','.join(have['face']) or 'none'}"
               + (f" system={have['system']} code={have['code']!r}" if have['monitor'] == 'live proctoring' else ""))
         if "\n" in (have["domains"] or ""):
@@ -596,6 +622,8 @@ def verb_lockdown(a):
             print(f"would set: required={not a.off} domains={domains!r}"
                   + (f" proctoring={mode}" if mode else "")
                   + (f" second camera={a.second_camera}" if a.second_camera is not None else "")
+                  + (f" proctored lab={a.proctored_lab}" if a.proctored_lab is not None else "")
+                  + (f" exam password={a.lockdown_password!r}" if a.lockdown_password is not None else "")
                   + (f" steps={','.join(steps) or 'none'}" if steps is not None else "")
                   + (f" face={','.join(face) or 'none'}" if face is not None else "")
                   + (f" system={system}" if system else "") + (f" code={a.live_code!r}" if a.live_code is not None else "")
@@ -631,8 +659,21 @@ def verb_lockdown(a):
             b.insert(domains); time.sleep(1)
             if b.eval(f"{BOX}.value").strip() != domains:
                 sys.exit(f"the sites box reads {b.eval(f'{BOX}.value')!r}, not {domains!r}; nothing saved")
+        if not a.off and a.lockdown_password is not None:
+            r = b.eval(f"(() => {{ const e = {PASSWORD}; if (!e) return null; e.scrollIntoView({{block: 'center'}}); "
+                       "e.value = ''; e.focus(); return absOf(e); })()")
+            if not r:
+                sys.exit("no box for LockDown Browser's exam password on the page; nothing saved")
+            b.click_xy(r["x"], r["y"]); time.sleep(0.5)
+            b.eval(f"(() => {{ const e = {PASSWORD}; e.value = ''; e.focus(); }})()")
+            if a.lockdown_password:
+                b.insert(a.lockdown_password)
+            b.eval(f"(() => {{ const e = {PASSWORD}; for (const t of ['input', 'change']) e.dispatchEvent(new Event(t, {{bubbles: true}})); }})()")
+            time.sleep(1)
+            if b.eval(f"{PASSWORD}.value") != a.lockdown_password:
+                sys.exit(f"the exam password reads {b.eval(f'{PASSWORD}.value')!r}, not {a.lockdown_password!r}; nothing saved")
         if not a.off and mode:
-            set_monitor(b, p, mode, a.second_camera, steps, face, system, a.live_code)
+            set_monitor(b, p, mode, a.second_camera, steps, face, system, a.live_code, a.proctored_lab)
         p.click_pred("""e => (e.tagName === 'INPUT' || e.tagName === 'BUTTON' || e.tagName === 'A') && /Save \\+ Close/.test(e.value || e.textContent || '')""", settle=10, what="Save + Close")
         print("row after save:", (respondus_row(p, name) or ["?"])[0])
     finally:
@@ -645,13 +686,18 @@ def verb_lockdown(a):
     finally:
         b.close()
     print(f"checked on the server: required={got['required']} external domains allowed={got['allow']} domains={got['domains']!r} "
-          f"monitor={got['monitor']} second camera={got['second_camera']}"
+          f"monitor={got['monitor']} second camera={got['second_camera']} proctored lab={got['lab']}"
+          f" exam password={got['password']!r}"
           f" steps={','.join(got['steps']) or 'none'} face={','.join(got['face']) or 'none'}"
           + (f" system={got['system']} code={got['code']!r}" if got['monitor'] == 'live proctoring' else ""))
     ok = (got["required"] is (not a.off)) and (a.off or (got["domains"] == domains and got["allow"] if domains
                                                     else not got["allow"]))
     if not a.off and mode:
         ok &= got["monitor"] == {"live": "live proctoring"}.get(mode, mode)
+    if not a.off and a.proctored_lab is not None:
+        ok &= got["lab"] is a.proctored_lab
+    if not a.off and a.lockdown_password is not None:
+        ok &= got["password"] == a.lockdown_password
     if not a.off and steps is not None:
         ok &= sorted(got["steps"]) == sorted(steps)
     if not a.off and face is not None:
@@ -1323,6 +1369,12 @@ def main():
                    help="require Respondus Monitor, or with --no-monitor not; left alone without either")
     s.add_argument("--second-camera", dest="second_camera", action=argparse.BooleanOptionalAction,
                    help="require a second camera, which is Monitor's; left alone without either")
+    s.add_argument("--proctored-lab", dest="proctored_lab", action=argparse.BooleanOptionalAction,
+                   help="also allow a sitting in a proctored lab, no webcam recording, which is Monitor's "
+                        "and needs the exam password")
+    s.add_argument("--lockdown-password", dest="lockdown_password", metavar="PASSWORD",
+                   help="LockDown Browser's own password to access the exam, which the lab's proctor types in; "
+                        "'' clears it")
     s.add_argument("--monitor-steps", dest="monitor_steps", metavar="'instructions, environment'",
                    help="the startup steps on, the rest off: " + ", ".join(STEPS) + "; or none")
     s.add_argument("--face-detection", dest="face_detection", metavar="'block, notify'",

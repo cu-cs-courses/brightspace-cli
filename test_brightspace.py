@@ -1391,7 +1391,12 @@ if COOKIES_OK:
                           ({"face_detection": "block", "monitor": "false"}, "face_detection: are Respondus Monitor's"),
                           ({"live_proctoring": "skype"}, "live_proctoring: is the video system"),
                           ({"live_proctoring": "zoom", "second_camera": "true"}, "live_proctoring: is instead of Respondus Monitor"),
-                          ({"live_proctoring_code": "abc"}, "the plan has no live_proctoring:")]:
+                          ({"live_proctoring_code": "abc"}, "the plan has no live_proctoring:"),
+                          ({"proctored_lab": "true", "monitor": "false", "lockdown_password": "x"},
+                           "proctored_lab: is Respondus Monitor's"),
+                          ({"proctored_lab": "true"}, "proctored_lab: needs lockdown_password:"),
+                          ({"lockdown_password": "x", "lockdown": "false"}, "lockdown_password: is LockDown Browser's"),
+                          ({"proctored_lab": "true", "live_proctoring": "zoom"}, "proctored_lab:, monitor_steps:")]:
             run("setup-quiz", quiz_yml("bad.yml", **({"name": "Quiz 16"} | keys)), ok=False, has=[why],
                 lacks=["Traceback"])
         # LockDown and visibility: keys of the block, flags of the same names. Here,
@@ -1431,6 +1436,11 @@ if COOKIES_OK:
             has=["Respondus Monitor required, startup steps: instructions, environment, face detection: notify",
                  "Require Respondus Monitor; Startup Sequence: on, instructions, environment, the rest off; "
                  "Face Detection Options: on, notify, the rest off"])
+        run("setup-quiz", quiz_yml("q23.yml", name="Quiz 23", proctored_lab="true", lockdown_password="lab-pw"),
+            has=["LockDown Browser required, no other site allowed, exam password lab-pw; "
+                 "Respondus Monitor required, or in a proctored lab",
+                 "Require LockDown Browser; Password to access exam: lab-pw; Require Respondus Monitor; "
+                 "Monitor's Advanced Settings -> allow this exam to additionally be delivered in a proctored lab"])
         run("setup-quiz", quiz_yml("q23.yml", name="Quiz 23", live_proctoring="Zoom", live_proctoring_code="pe2-zoom"),
             has=["LockDown Browser required, no other site allowed; live proctoring over Zoom, start code pe2-zoom",
                  "Require LockDown Browser; Allow instructor live proctoring -> Zoom, start code pe2-zoom"],

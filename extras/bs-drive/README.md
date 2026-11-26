@@ -77,7 +77,14 @@ or `none`; `--face-detection` does the same for `block` and `notify`; each
 implies `--monitor`. `--live-proctoring zoom --live-code pe2-zoom` chooses
 *Allow instructor live proctoring* instead of Monitor, with its video system
 (`zoom`, `teams`, `google meet`, `collaborate`, `webex`, `other`) and its start
-code. Without any of these, proctoring is left as it is; the readback, and
+code. `--proctored-lab` ticks Monitor's *Allow this exam to additionally be
+delivered in a proctored lab (no webcam recording)*, folded under its
+Advanced Settings, `monitorOptional_` and the quiz's key; it implies
+`--monitor`. Ticked, it turns LockDown's *Password to access exam*
+(`testPassword`) from optional to required, and a Save without one keeps the
+box unticked and says nothing (2026-11-25), so the verb refuses it unless the
+field holds a password or `--lockdown-password PW` gives one. That password is
+Respondus's own: Brightspace's quiz password reads none beside it. Without any of these, proctoring is left as it is; the readback, and
 `--json`, carry all of it either way. Switching a quiz to live proctoring
 resets Monitor's startup steps to Respondus's own, every one on (2026-11-25),
 so a quiz going back to Monitor names its steps again.
