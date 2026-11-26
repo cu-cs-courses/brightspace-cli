@@ -3226,9 +3226,12 @@ def cmd_setup(args):
 
 # A quiz's keys: its brightspace: block, and setup-quiz's flags of the same names.
 QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
-             "points", "grade_item", "description", "shell", "calendar", "special_access_only",
+             "points", "grade_item", "description", "header", "footer", "shell", "calendar", "special_access_only",
              "lockdown", "lockdown_domains", "lockdown_password", "monitor", "second_camera", "proctored_lab",
              "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code", "visible")
+# The three texts a quiz carries in Markdown, each kept as written, indentation
+# and all, since a fenced program inside one keeps its spaces.
+TEXT_KEYS = ("description", "header", "footer")
 # Respondus Monitor's startup steps that can be left out, face detection's two
 # options, and live proctoring's video systems: bs-drive's names for them.
 MONITOR_STEPS = ("instructions", "guidelines", "photo", "id", "environment")
@@ -3436,9 +3439,10 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
                          f"it reads {', '.join(QUIZ_KEYS)}")
     at = f"{path}: brightspace:" if path else "setup-quiz"
     given = {k: v.strip() for k, v in block.items() if k != "grade_item" and v.strip() not in fmt.NONE}
-    if "description" in given:
-        given["description"] = block["description"]
-    given |= {k: v.strip() if k != "description" else v for k, v in flags.items() if str(v).strip()}
+    for key in TEXT_KEYS:
+        if key in given:
+            given[key] = block[key]
+    given |= {k: v.strip() if k not in TEXT_KEYS else v for k, v in flags.items() if str(v).strip()}
     for key in ("course", "name"):
         if key not in given:
             raise Failed(f"{at} has no {key}")
@@ -3541,11 +3545,12 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     plan["template_course"] = plan["sections"][0] if "shell" in plan else course_label
     if "shell" in plan:
         plan["item"] = False      # a shell's has nowhere to send scores; each copy gets its section's
-    if "description" in plan:
-        try:
-            plan["description_html"] = fmt.md_html(plan["description"], f"{at} description")
-        except fmt.Failed as e:
-            raise Failed(str(e))
+    for key in TEXT_KEYS:
+        if key in plan:
+            try:
+                plan[f"{key}_html"] = fmt.md_html(plan[key], f"{at} {key}")
+            except fmt.Failed as e:
+                raise Failed(str(e))
     plan |= {"path": path, "questions": None, "csv_state": None, "msa": [], "shuffle": [], "csv_text": csv_text}
     if path:
         csv_path = path.with_suffix(".csv")
@@ -3582,7 +3587,7 @@ def quiz_summary(plan, template=None):
     else:
         item = "no grade item"
     lines = [f"{plan['name']} {where}: {has}", f"  {when}",
-             f"  {copied}; {item}" + ("; a description" if "description" in plan else "")]
+             f"  {copied}; {item}" + "".join(f"; a {k}" for k in TEXT_KEYS if k in plan)]
     extras = []
     if "lockdown" in plan:
         n = len(domain_list(plan.get("lockdown_domains")))
@@ -3634,6 +3639,12 @@ def quiz_remainder(plan, template, shown, done=()):
     else:
         steps = [f"Its questions: {plan['name']} -> Add/Edit Questions, written there or imported\n"
                  "    into the Question Library and added with Add Existing."]
+    for key in ("header", "footer"):
+        if key in plan and "header" not in done:
+            # The editor's source view takes the HTML as it is; the API would turn
+            # {OrgDefinedId} into your own id for every student.
+            steps.append(f"Timing & Display -> Manage Header and Footer -> {key.title()} -> the source code view, "
+                         f"this HTML, made from {key}: in the file:\n    {plan[key + '_html']}")
     if "lockdown" in plan and "lockdown" not in done:
         monitor = ""
         if "live_proctoring" in plan:
@@ -3735,6 +3746,19 @@ def check_quiz(s, ou, plan, by_hand=False):
             want, got = text_pair(plan["description_html"], text_of((q.get("Description") or {}).get("Text")))
             cut = lambda t: t if len(t) <= 32 else t[:31] + "…"
             row("description", cut(want), cut(got) or "(none)", want == got)
+        if "header" in plan or "footer" in plan:
+            why = drive_unready(s, by_hand)
+            got = None if why else drive_read_header(s, ou, q["Name"])
+            for key in ("header", "footer"):
+                if key not in plan:
+                    continue
+                cut = lambda t: t if len(t) <= 32 else t[:31] + "…"
+                want = re.sub(r"<[^>]+>", "", plan[f"{key}_html"]).strip()
+                if got is None:
+                    row(key, cut(want), f"(not read: {why or 'bs-drive failed'})", True)
+                else:
+                    row(key, cut(want), cut(re.sub(r"<[^>]+>", "", got.get(key) or "").strip()) or "(none)",
+                        same_html(plan[f"{key}_html"], got.get(key)))
         if "visible" in plan:
             row("visible", yes_no(as_flag(plan["visible"])), yes_no(q.get("IsActive")))
         else:
@@ -3797,12 +3821,43 @@ def drive_unready(s, by_hand=False):
     return None
 
 
+def shown_argv(argv):
+    """bs-drive's argv as a line to read: a header's HTML cut to its start."""
+    return " ".join(shell_quote(a if len(a) <= 72 else a[:60] + f"… ({len(a)} chars)") for a in argv)
+
+
 def drive(s, *argv):
     """bs-drive with argv, as this session acts, its output shown as it comes.
     True when it says it did what it was asked, read back."""
     env = dict(os.environ, BS_HOST=urllib.parse.urlsplit(s.base).hostname)
-    print(f"\n$ bs-drive.py {' '.join(shell_quote(a) for a in argv)}", flush=True)
+    print(f"\n$ bs-drive.py {shown_argv(argv)}", flush=True)
     return subprocess.run([sys.executable, str(DRIVE), *argv], env=env).returncode == 0
+
+
+def drive_read_header(s, ou, name):
+    """The quiz's {header, footer} HTML as the editor holds it, which is what
+    students get: the API's read puts the caller's own id for {OrgDefinedId}.
+    None when bs-drive could not read it."""
+    env = dict(os.environ, BS_HOST=urllib.parse.urlsplit(s.base).hostname)
+    r = subprocess.run([sys.executable, str(DRIVE), "header", str(ou), name, "--json"],
+                       env=env, capture_output=True, text=True)
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else None
+    except (ValueError, IndexError):
+        return None
+
+
+def same_html(a, b):
+    """Two pieces of HTML the same, as bs-drive's header readback compares them:
+    the quiz editor writes a void tag without its slash, & as &amp;, a space
+    after a style's colon, and rel="noopener" on every link, and keeps
+    newlines between blocks."""
+    def norm(t):
+        t = re.sub(r"\s*/>", ">", re.sub(r">\s+<", "><", (t or "").replace("\n", " ").replace("&amp;", "&")))
+        t = re.sub(r'\s+rel="noopener(?: noreferrer)?"', "", t)
+        return re.sub(r'style="([^"]*)"', lambda m: 'style="' + re.sub(r"\s*([:;])\s*", r"\1", m[1]).strip() + '"',
+                      t).strip()
+    return norm(a) == norm(b)
 
 
 def drive_read_lockdown(s, ou, name):
@@ -3831,6 +3886,9 @@ def drive_steps(plan, ou):
         if any(on for _, _, on in plan["shuffle"]):
             steps.append(("questions", ["shuffle", str(ou), str(plan["path"]), "--section", section, "--go"]))
         steps.append(("questions", ["add", str(ou), plan["name"], str(plan["csv"]), "--section", section, "--go"]))
+    if "header" in plan or "footer" in plan:
+        steps.append(("header", ["header", str(ou), plan["name"], "--go"]
+                      + [x for k in ("header", "footer") if k in plan for x in (f"--{k}-html", plan[f"{k}_html"])]))
     if "lockdown" in plan:
         if as_flag(plan["lockdown"]):
             steps.append(("lockdown", ["lockdown", str(ou), plan["name"], "--go"]
@@ -3973,16 +4031,17 @@ def cmd_setup_quiz(args):
               item_hint=("a shell's has nowhere to send scores; each copy goes to its section's" if shell else
                          "the plan says grade_item: none" if not plan["item"] else
                          "--go attaches the one made above, which a plan cannot name"))
-    if args.go and ("lockdown_password" in plan or "live_proctoring_code" in plan):
-        refuse_student_names(s, ou, f"the quiz {plan['name']!r}'s exam password or start code",
-                             plan.get("lockdown_password"), plan.get("live_proctoring_code"))
+    names_in = ("header", "footer", "lockdown_password", "live_proctoring_code")
+    if args.go and any(k in plan for k in names_in):
+        refuse_student_names(s, ou, f"the quiz {plan['name']!r}'s header, footer, exam password or start code",
+                             *[plan.get(k) for k in names_in])
     why = drive_unready(s, args.by_hand)
     steps = [] if why else drive_steps(plan, ou)
     done = set()
     if steps and not args.go:
         print("\nThen, with --go, bs-drive takes the steps the API has no route for:")
         for _, argv in steps:
-            print(f"    bs-drive.py {' '.join(shell_quote(a) for a in argv)}")
+            print(f"    bs-drive.py {shown_argv(argv)}")
         if as_flag(plan.get("visible")) and plan["path"]:
             print("    and the quiz is made visible, through the API, once its questions are in")
         done = {key for key, _ in steps} | ({"visible"} if as_flag(plan.get("visible")) and plan["path"] else set())
@@ -4003,7 +4062,7 @@ def cmd_setup_quiz(args):
         elif as_flag(plan.get("visible")) and plan["path"] and made:
             if show_quiz(s, ou, made["QuizId"]):
                 done.add("visible")
-    elif why and (plan["path"] or "lockdown" in plan):
+    elif why and (plan["path"] or any(k in plan for k in ("lockdown", "header", "footer"))):
         print(f"\nbs-drive does not take the steps by hand here: {why}.")
     print("\n" + quiz_remainder(plan, template["Name"], args.file, done))
     wanted = {k for k, _ in steps} | ({"visible"} if steps and as_flag(plan.get("visible")) and plan["path"] else set())

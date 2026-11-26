@@ -464,8 +464,10 @@ every step the API has no route for through
 [`extras/bs-drive/`](extras/bs-drive/README.md) when `chromium` is on `PATH`
 and Python has `websocket-client`: the questions in, the blanks, the options
 shuffled, Add Existing,
-LockDown and its sites, Monitor with its steps and second camera or live
-proctoring, then the quiz shown. `--by-hand`, or
+the header and footer (`header:` and `footer:`, Markdown, through the
+editor so that `{OrgDefinedId}` stays each student's), LockDown and its
+sites, Monitor with its steps and second camera or live proctoring, then the
+quiz shown. `--by-hand`, or
 `BRIGHTSPACE_BY_HAND` set, prints them instead. The web page takes the same
 steps, as a job it shows running (below). Respondus renames a quiz it
 guards, *Quiz 9- Requires Respondus LockDown Browser*, and with Monitor
@@ -684,7 +686,7 @@ with start and end as times of day:
 |---|---|
 | `like` | The quiz its settings come from; `previous`, the one numbered before it, when left out. |
 | `start`, `end` | The times it opens and closes, on the quiz's date. |
-| `minutes`, `attempts`, `ip`, `password`, `points`, `grade_item`, `description` | As in a quiz's block. |
+| `minutes`, `attempts`, `ip`, `password`, `points`, `grade_item`, `description` | As in a quiz's block. `header` and `footer` are a quiz's own and not defaults. |
 | `shell` | Where its quizzes are made, to be copied into the sections. |
 | `sections` | For a course taught as several: the labels of its sections, the first of which its settings come from. |
 | `item_like` | The grade item each section's copy is shaped like, where the section has none of the quiz's name; `previous` by default. |

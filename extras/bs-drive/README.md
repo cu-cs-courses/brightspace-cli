@@ -50,11 +50,17 @@ the real one. Each verb here was proved on `APelenitsyn_Devshell_01`, org unit
 
 ## The verbs
 
-**`header`** pastes the two HTML files into *Timing & Display → Manage Header
-and Footer*. The files are what `exam.py header` prints for an exam seat, or
-any HTML; a header for a quiz in LockDown links the seat with
-`{OrgDefinedId}` in the address, which the editor keeps as written. The
-readback compares the HTML with the file, newlines aside.
+**`header`** pastes the header and the footer into *Timing & Display → Manage
+Header and Footer*, from HTML files (`--header`, `--footer`) or as HTML on the
+command line (`--header-html`, `--footer-html`, which is how `setup-quiz`
+hands over what it made of a quiz file's `header:` and `footer:`). The files
+are what `exam.py header` prints for an exam seat, or any HTML; a header for a
+quiz in LockDown links the seat with `{OrgDefinedId}` in the address, which the
+editor keeps as written. The readback compares the HTML with what was given,
+newlines, the space between tags, `<br />` for `<br>` and `&amp;` for `&`
+aside. `--json` prints both as the editor holds them, and writes nothing:
+`setup-quiz --check` reads them that way, since the API's read puts the
+caller's own id where `{OrgDefinedId}` is.
 
 **`visible`** flips the switch at the foot of the editor and saves; `--hidden`
 hides. `brightspace.py` cannot: the switch is not in the quiz object.

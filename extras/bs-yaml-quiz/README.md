@@ -283,6 +283,8 @@ brightspace:
 | `points` | What its grade item is out of, when one is made. The copied item's when left out. |
 | `grade_item` | `none` for no grade item. Left out, the quiz goes to an item of its own name, made like the one `like` sends its scores to if there is none yet. |
 | `description` | What students read before they start, in Markdown, as a question's text is. |
+| `header` | What students read above every page of the quiz, in Markdown, with raw HTML in a ```` ```{=html} ```` fence. It goes in through the quiz editor, by `bs-drive.py header`, so a replace string such as `{OrgDefinedId}` reaches each student as theirs: saved through the API it would be the saver's own. |
+| `footer` | The same, below every page: the open book's links, say. |
 | `calendar` | `false` keeps its dates out of the course calendar. The copied quiz's when left out. |
 | `special_access_only` | `true` shows it only to users given special access, which the UI adds. For a sitting meant for one student: made this way, there is no moment at which the course sees it. |
 | `shell` | Make it in this empty shell, to copy into the course's sections afterwards. |

@@ -5,7 +5,7 @@ session brightspace.py keeps, one verb per setting. Each verb opens the quiz's
 editor, prints what is there, and with --go changes it and reads it back from
 a fresh load; without --go nothing is written.
 
-    bs-drive.py header   COURSE QUIZ --header FILE [--footer FILE] [--go]
+    bs-drive.py header   COURSE QUIZ [--header FILE | --header-html HTML] [--footer FILE | --footer-html HTML] [--json] [--go]
     bs-drive.py visible  COURSE QUIZ [--hidden] [--go]
     bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--[no-]monitor] [--[no-]second-camera] [--[no-]proctored-lab] [--lockdown-password PW]
                          [--monitor-steps LIST] [--face-detection LIST] [--live-proctoring SYSTEM --live-code CODE] [--go]
@@ -344,20 +344,43 @@ def save_page(p):
 
 # ------------------------------------------------------------------- the verbs
 
+def same_html(a, b):
+    """Whether two pieces of HTML are the same. The quiz editor keeps the text
+    and the tags and rewrites the rest: <br /> comes back <br>, & as &amp;,
+    font-family:monospace; as font-family: monospace;, a link with
+    rel="noopener", and a newline between blocks (2026-11-25)."""
+    def norm(t):
+        t = re.sub(r"\s*/>", ">", re.sub(r">\s+<", "><", (t or "").replace("\n", " ").replace("&amp;", "&")))
+        t = re.sub(r'\s+rel="noopener(?: noreferrer)?"', "", t)
+        return re.sub(r'style="([^"]*)"', lambda m: 'style="' + re.sub(r"\s*([:;])\s*", r"\1", m[1]).strip() + '"',
+                      t).strip()
+    return norm(a) == norm(b)
+
+
 def read_header(p):
     return p.b.eval("Object.fromEntries(deepAll('d2l-htmleditor').map(e => [e.getAttribute('label'), e.html || '']))")
 
 
 def verb_header(a):
+    """The header and footer, from HTML files or as HTML on the command line
+    (setup-quiz's, made from a quiz file's Markdown), through the quiz editor:
+    saved through the API, {OrgDefinedId} would become the saver's own id."""
     ou = org_unit(a.course); qi, name = quiz(ou, a.quiz)
-    want = {"Header": pathlib.Path(a.header).read_text()}
-    if a.footer:
-        want["Footer"] = pathlib.Path(a.footer).read_text()
+    want = {}
+    for key, file, html in (("Header", a.header, a.header_html), ("Footer", a.footer, a.footer_html)):
+        if file and html is not None:
+            sys.exit(f"--{key.lower()} and --{key.lower()}-html are two ways to give one {key.lower()}: take one")
+        if file or html is not None:
+            want[key] = pathlib.Path(file).read_text() if file else html
+    if not want and not a.json:
+        sys.exit("nothing to paste: --header, --footer, --header-html or --footer-html")
     b, p = session(ou, qi)
     try:
         p.click("button, d2l-button, d2l-button-subtle", "Timing & Display")
         p.click("button, d2l-button, d2l-button-subtle", "Manage Header and Footer")
         have = read_header(p)
+        if a.json:
+            print(json.dumps({k.lower(): have.get(k, "") for k in ("Header", "Footer")})); return
         for k in ("Header", "Footer"):
             print(f"{name}: {k} now {len(have.get(k, ''))} chars" + (f", would become {len(want[k])}" if k in want else ""))
         if not a.go:
@@ -387,9 +410,11 @@ def verb_header(a):
         b.close()
     ok = True
     for k, v in want.items():
-        same = got.get(k, "").replace("\n", "") == v.replace("\n", "")
+        same = same_html(got.get(k, ""), v)
         ok &= same
-        print(f"checked on the server: {k} {len(got.get(k, ''))} chars, {'identical to the file' if same else 'DIFFERS from the file'}")
+        print(f"checked on the server: {k} {len(got.get(k, ''))} chars, {'identical to what was given' if same else 'DIFFERS from what was given'}")
+        if not same:
+            print(f"  given: {v.strip()}\n  held:  {got.get(k, '').strip()}")
     if not ok:
         sys.exit(1)
 
@@ -1358,8 +1383,13 @@ def main():
         s.add_argument("quiz", help="a quiz id, or its exact name")
         s.add_argument("--go", action="store_true", help="write it; without this, only read")
 
-    s = sub.add_parser("header", help="paste the header, and the footer, as HTML files"); common(s)
-    s.add_argument("--header", required=True); s.add_argument("--footer"); s.set_defaults(fn=verb_header)
+    s = sub.add_parser("header", help="paste the header, and the footer, as HTML"); common(s)
+    s.add_argument("--header", metavar="FILE", help="the header, an HTML file")
+    s.add_argument("--footer", metavar="FILE", help="the footer, an HTML file")
+    s.add_argument("--header-html", dest="header_html", metavar="HTML", help="the header as HTML; '' empties it")
+    s.add_argument("--footer-html", dest="footer_html", metavar="HTML", help="the footer as HTML; '' empties it")
+    s.add_argument("--json", action="store_true", help="print both as the editor holds them, and write nothing")
+    s.set_defaults(fn=verb_header)
     s = sub.add_parser("visible", help="the visibility switch at the foot of the editor"); common(s)
     s.add_argument("--hidden", action="store_true", help="hide it (the default makes it visible)"); s.set_defaults(fn=verb_visible)
     s = sub.add_parser("lockdown", help="require LockDown Browser, with its allowed domains"); common(s)

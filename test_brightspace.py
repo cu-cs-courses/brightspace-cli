@@ -1436,6 +1436,21 @@ if COOKIES_OK:
             has=["Respondus Monitor required, startup steps: instructions, environment, face detection: notify",
                  "Require Respondus Monitor; Startup Sequence: on, instructions, environment, the rest off; "
                  "Face Detection Options: on, notify, the rest off"])
+        # The header and footer, Markdown made HTML, go in through the quiz editor;
+        # by hand here, as the HTML for the editor's source view.
+        q24 = pathlib.Path(quiz_yml("q24.yml", name="Quiz 24", description=False))
+        q24.write_text(q24.read_text().replace("  points: 8\n", "  points: 8\n  header: |\n    **No AI**, and [your seat]"
+                                               "(https://seat.example/desk/?id={OrgDefinedId}&t=abc).\n"
+                                               "  footer: |\n    ```{=html}\n    <p>Open book</p>\n    ```\n"))
+        run("setup-quiz", str(q24),
+            has=["scores to a grade item 'Quiz 24', out of 8; a header; a footer",
+                 "Timing & Display -> Manage Header and Footer -> Header -> the source code view, this HTML, "
+                 "made from header: in the file:\n    <p><strong>No AI</strong>, and <a href=\"https://seat.example/desk/"
+                 "?id={OrgDefinedId}&t=abc\">your seat</a>.</p>",
+                 "Manage Header and Footer -> Footer -> the source code view, this HTML, made from footer: in the file:"
+                 "\n    <p>Open book</p>"])
+        q24.write_text(q24.read_text().replace("<p>Open book</p>\n    ```\n", "<p>Open book</p>\n"))
+        run("setup-quiz", str(q24), ok=False, has=["brightspace: footer: a block opened with ``` is never closed"])
         run("setup-quiz", quiz_yml("q23.yml", name="Quiz 23", proctored_lab="true", lockdown_password="lab-pw"),
             has=["LockDown Browser required, no other site allowed, exam password lab-pw; "
                  "Respondus Monitor required, or in a proctored lab",
