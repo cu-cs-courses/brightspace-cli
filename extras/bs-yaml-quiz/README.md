@@ -278,7 +278,7 @@ brightspace:
 | `like` | The quiz it copies its settings from: shuffle, auto-publish, paging and the rest. The course's last quiz when left out. |
 | `start`, `end` | Local time, as `2026-10-06 12:30`; the end is its due date too. No dates when left out. |
 | `minutes` | A time limit, enforced, or `none` for a quiz with no timer, an exam. The copied quiz's when left out, unless the course's defaults name one. |
-| `attempts` | How many. 1 when left out. |
+| `attempts` | How many, or `unlimited`. 1 when left out. |
 | `ip`, `password` | The addresses it can be taken from, as `148.137.150.0-148.137.150.255`, and a password. |
 | `points` | What its grade item is out of, when one is made. The copied item's when left out. |
 | `grade_item` | `none` for no grade item. Left out, the quiz goes to an item of its own name, made like the one `like` sends its scores to if there is none yet. |

@@ -1687,8 +1687,7 @@ def cmd_quiz(args):
         ("visible to students", yes_no(q.get("IsActive"))),
         ("IP restriction", ip_ranges(q)),
         ("password", "set" if q.get("Password") else "none"),
-        ("attempts allowed", (q.get("AttemptsAllowed") or {}).get("NumberOfAttemptsAllowed")
-                             if isinstance(q.get("AttemptsAllowed"), dict) else q.get("NumberOfAttemptsAllowed")),
+        ("attempts allowed", attempts_of(q)),
         ("starts", local(q.get("StartDate")) or "no start date"),
         ("ends", local(q.get("EndDate")) or "no end date"),
         ("due", local(q.get("DueDate")) or "no due date"),
@@ -2269,6 +2268,25 @@ def quiz_questions(s, ou, qid):
     return (got.get("Objects") if isinstance(got, dict) else got) or []
 
 
+def attempts_allowed(text):
+    """A quiz's attempts as the API takes them: a whole number, or None for
+    unlimited, which reads back as AttemptsAllowed's IsUnlimited (2026-11-25)."""
+    text = str(text).strip()
+    if text.lower() == "unlimited":
+        return None
+    if not re.fullmatch(r"[1-9]\d*", text):
+        raise Failed(f"attempts: is a whole number, or unlimited, not {text!r}")
+    return int(text)
+
+
+def attempts_of(q):
+    """A quiz's attempts as a person reads them: the number, or unlimited."""
+    a = q.get("AttemptsAllowed")
+    if not isinstance(a, dict):
+        return str(q.get("NumberOfAttemptsAllowed"))
+    return "unlimited" if a.get("IsUnlimited") else str(a.get("NumberOfAttemptsAllowed"))
+
+
 def quiz_update_payload(q):
     """A quiz as the API returns it, reshaped into what its PUT accepts.
 
@@ -2475,7 +2493,7 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
         "StartDate": local_to_utc(args.start) if args.start else None,
         "EndDate": local_to_utc(args.end) if args.end else None,
         "DueDate": local_to_utc(args.end) if args.end else None,
-        "NumberOfAttemptsAllowed": int(args.attempts),
+        "NumberOfAttemptsAllowed": attempts_allowed(args.attempts),
         "Password": args.password,
         "AutoExportToGrades": False,
         "GradeItemId": None,
@@ -2540,7 +2558,8 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
         ("name", args.name, back.get("Name")),
         ("start", payload["StartDate"], back.get("StartDate")),
         ("end", payload["EndDate"], back.get("EndDate")),
-        ("attempts", int(args.attempts), (back.get("AttemptsAllowed") or {}).get("NumberOfAttemptsAllowed")),
+        ("attempts", "unlimited" if payload["NumberOfAttemptsAllowed"] is None
+         else str(payload["NumberOfAttemptsAllowed"]), attempts_of(back)),
         ("time limit", limit_of(payload.get("SubmissionTimeLimit")), limit_of(back.get("SubmissionTimeLimit"))),
         ("IP range", ips(payload["RestrictIPAddressRange"]), ips(back.get("RestrictIPAddressRange"))),
         ("password", bool(args.password), bool(back.get("Password"))),
@@ -3293,9 +3312,12 @@ def check_value(key, value, at):
     """Refuse a value a quiz's key, or a default's, cannot take."""
     if key == "minutes" and no_limit(value):
         return
+    if key == "attempts" and value.lower() == "unlimited":
+        return
     if key in ("minutes", "attempts") and not re.fullmatch(r"[1-9]\d*", value):
         raise Failed(f"{at} {key}: is a whole number, not {value!r}"
-                     + (" -- or none, for a quiz with no time limit" if key == "minutes" else ""))
+                     + (" -- or none, for a quiz with no time limit" if key == "minutes" else
+                        " -- or unlimited"))
     if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "proctored_lab", "visible") \
             and value.strip().lower() not in TRUTH | FALSITY:
         raise Failed(f"{at} {key}: is true or false, not {value!r}")
@@ -3574,7 +3596,8 @@ def quiz_summary(plan, template=None):
     when = (f"opens {plan.get('start', 'with no start date')}, closes {plan.get('end', 'with no end date')}; "
             + ", ".join(x for x in (("no time limit" if no_limit(plan.get("minutes")) else nums("minutes", "minute"))
                                     or "the time limit of the quiz it copies",
-                                    nums("attempts", "attempt") or "1 attempt") if x))
+                                    "unlimited attempts" if str(plan.get("attempts")).lower() == "unlimited"
+                                    else nums("attempts", "attempt") or "1 attempt") if x))
     copied = f"settings copied from {template!r}" if template else (
         f"settings copied from {plan['like']!r}" if plan.get("like") not in (None, "previous")
         else "settings copied from the quiz numbered before it")
@@ -3717,8 +3740,7 @@ def check_quiz(s, ou, plan, by_hand=False):
             row("time limit", f"{plan['minutes']} minutes" if "minutes" in plan else "-",
                 f"{minutes} minutes" if on else "(none)",
                 "minutes" not in plan or (on and str(minutes) == plan["minutes"]))
-        row("attempts", plan.get("attempts", "1"),
-            str((q.get("AttemptsAllowed") or {}).get("NumberOfAttemptsAllowed")))
+        row("attempts", str(plan.get("attempts", "1")).lower(), attempts_of(q))
         ips = [f"{r.get('IPRangeStart')}-{r.get('IPRangeEnd')}" for r in q.get("RestrictIPAddressRange") or []]
         row("IP range", re.sub(r"\s+", "", plan.get("ip", "")) or "(none)", ", ".join(ips) or "(none)")
         row("password", plan.get("password", "(none)"), q.get("Password") or "(none)")
@@ -4735,7 +4757,7 @@ def main(argv=None):
     x.add_argument("--start", help="local time, '2026-09-29 12:30'")
     x.add_argument("--end", help="local time, '2026-09-29 13:25'")
     x.add_argument("--minutes", help="enforced time limit, or none for no timer; without it, --like's limit is kept as it is")
-    x.add_argument("--attempts", default=1)
+    x.add_argument("--attempts", default=1, help="a whole number, or unlimited")
     x.add_argument("--ip", help="allowed range, '148.137.150.0-148.137.150.255'")
     x.add_argument("--password")
     x.add_argument("--like", help="an existing quiz to copy the settings from")
@@ -4826,7 +4848,7 @@ def main(argv=None):
     x.add_argument("--end", help="'15:29' on --date, or '2026-10-12 15:29'")
     x.add_argument("--minutes", help="enforced time limit, or none for no timer; without it, the copied quiz's, "
                                      "unless the course's defaults say otherwise")
-    x.add_argument("--attempts")
+    x.add_argument("--attempts", help="a whole number, or unlimited")
     x.add_argument("--points", help="what its grade item is out of")
     x.add_argument("--like", help="the quiz to copy the settings from (default: the one numbered before it)")
     x.add_argument("--ip", help="allowed range, '148.137.150.0-148.137.150.255'")

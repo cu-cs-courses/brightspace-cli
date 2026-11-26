@@ -421,7 +421,7 @@ class H(BaseHTTPRequestHandler):
             if "AttemptsAllowed" in body:
                 return self.send(400, {"title": "JSON Binding Error"})
             made = {k: v for k, v in body.items() if k != "NumberOfAttemptsAllowed"} | {
-                "QuizId": NEXT["made"], "AttemptsAllowed": {"IsUnlimited": False,
+                "QuizId": NEXT["made"], "AttemptsAllowed": {"IsUnlimited": body.get("NumberOfAttemptsAllowed") is None,
                                                             "NumberOfAttemptsAllowed": body.get("NumberOfAttemptsAllowed")}}
             for key in ("Instructions", "Description", "Header", "Footer"):
                 if isinstance(body.get(key), dict):
@@ -944,6 +944,9 @@ if COOKIES_OK:
     run("set-quiz", "240", "Midterm Part 1", "--header", str(header),
         has=["header: 0 chars -> ", "chars, displayed", "checked on the server: header, StartDate"])
     run("new-quiz", "240", "Whatever", "--ip", "nonsense", ok=False, has=["wants a range like"])
+    run("new-quiz", "240", "Whatever", "--attempts", "lots", ok=False, has=["attempts: is a whole number, or unlimited"])
+    run("new-quiz", "240", "Practice forever", "--attempts", "Unlimited",
+        has=['"NumberOfAttemptsAllowed": null', "checked on the server: name, start, end, attempts"])
     t = run("new-folder", "240", "Assignment 5", "--like", "Assignment 4",
             "--open", "2026-09-30 00:01", "--due", "2026-10-06 23:59:59",
             "--link", "https://example.edu/a5.html", "--dry-run",
@@ -1390,6 +1393,7 @@ if COOKIES_OK:
                           ({"monitor_steps": "photo, selfie"}, "monitor_steps: are some of instructions, guidelines"),
                           ({"face_detection": "block", "monitor": "false"}, "face_detection: are Respondus Monitor's"),
                           ({"live_proctoring": "skype"}, "live_proctoring: is the video system"),
+                          ({"attempts": "lots"}, "attempts: is a whole number, not 'lots' -- or unlimited"),
                           ({"live_proctoring": "zoom", "second_camera": "true"}, "live_proctoring: is instead of Respondus Monitor"),
                           ({"live_proctoring_code": "abc"}, "the plan has no live_proctoring:"),
                           ({"proctored_lab": "true", "monitor": "false", "lockdown_password": "x"},
@@ -1436,6 +1440,9 @@ if COOKIES_OK:
             has=["Respondus Monitor required, startup steps: instructions, environment, face detection: notify",
                  "Require Respondus Monitor; Startup Sequence: on, instructions, environment, the rest off; "
                  "Face Detection Options: on, notify, the rest off"])
+        # Unlimited attempts: null to the API, IsUnlimited when read back.
+        run("setup-quiz", quiz_yml("q25.yml", name="Quiz 25", attempts="unlimited"),
+            has=["8 minutes, unlimited attempts", '"NumberOfAttemptsAllowed": null'])
         # The header and footer, Markdown made HTML, go in through the quiz editor;
         # by hand here, as the HTML for the editor's source view.
         q24 = pathlib.Path(quiz_yml("q24.yml", name="Quiz 24", description=False))
