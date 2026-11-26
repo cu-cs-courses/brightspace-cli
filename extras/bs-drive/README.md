@@ -92,7 +92,9 @@ box unticked and says nothing (2026-11-25), so the verb refuses it unless the
 field holds a password or `--lockdown-password PW` gives one. That password is
 Respondus's own: Brightspace's quiz password reads none beside it.
 `--lock-in` ticks LockDown's own *Lock students into the browser until exam is
-completed* (`lockIntoLDB`), and `--calculator standard`, `scientific` or `none`
+completed* (`lockIntoLDB`), `--for-results` its *Require LockDown Browser to
+view post-exam feedback and results* (`ldbRequiredForFeedback_` and the quiz's
+key), and `--calculator standard`, `scientific` or `none`
 its *Enable Calculator on the toolbar* (`enableCalc`, then the `calcType` radio,
 `basicCalc` or `scientificCalc`), both under LockDown's Advanced Settings.
 Without any of these, proctoring is left as it is; the readback, and

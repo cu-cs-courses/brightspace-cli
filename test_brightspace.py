@@ -1624,10 +1624,13 @@ if COOKIES_OK:
         run("setup-quiz", quiz_yml("q26.yml", name="Quiz 26", paging="Sections"), "--no-shuffle-questions",
             has=["questions in order; a page break after each section", '"Shuffle": false', '"PagingTypeId": 2'])
         # LockDown's calculator and its lock-in, under its Advanced Settings.
-        run("setup-quiz", quiz_yml("q29.yml", name="Quiz 29", lockdown_lock_in="true", lockdown_calculator="Scientific"),
-            has=["LockDown Browser required, no other site allowed, students locked in until done, a scientific calculator",
+        run("setup-quiz", quiz_yml("q29.yml", name="Quiz 29", lockdown_lock_in="true", lockdown_calculator="Scientific",
+                                   lockdown_for_results="false"),
+            has=["LockDown Browser required, no other site allowed, students locked in until done, results seen in "
+                 "any browser, a scientific calculator",
                  "Require LockDown Browser; Advanced Settings -> lock students into the browser until exam is "
-                 "completed; Advanced Settings -> Enable Calculator on the toolbar, scientific"])
+                 "completed; Advanced Settings -> don't require LockDown Browser to view post-exam feedback and "
+                 "results; Advanced Settings -> Enable Calculator on the toolbar, scientific"])
         # Unlimited attempts: null to the API, IsUnlimited when read back.
         run("setup-quiz", quiz_yml("q25.yml", name="Quiz 25", attempts="unlimited"),
             has=["8 minutes, unlimited attempts", '"NumberOfAttemptsAllowed": null'])
@@ -2102,7 +2105,8 @@ got_ = {"required": True, "allow": True, "domains": "a.org,\nb.edu", "monitor": 
         "lab": True, "password": "pw", "lock_in": True, "calculator": "scientific", "steps": ["photo"], "face": [],
         "form": {"enableCalc": [True, "Enable Calculator on the toolbar"], "enablePrint": [False, "Enable Printing"]}}
 argv_ = bs_.lockdown_argv(4207253, 3390287, got_)
-want_ = ["lockdown", "4207253", "3390287", "--go", "--domains", "a.org, b.edu", "--lock-in", "--calculator", "scientific",
+want_ = ["lockdown", "4207253", "3390287", "--go", "--domains", "a.org, b.edu", "--lock-in", "--no-for-results",
+         "--calculator", "scientific",
          "--lockdown-password", "pw", "--monitor", "--second-camera", "--proctored-lab", "--monitor-steps", "photo",
          "--face-detection", "none"]
 other_ = dict(got_, form={"enableCalc": [True, "Enable Calculator on the toolbar"], "enablePrint": [True, "Enable Printing"]})

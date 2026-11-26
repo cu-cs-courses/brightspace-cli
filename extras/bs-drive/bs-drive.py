@@ -8,7 +8,7 @@ a fresh load; without --go nothing is written.
     bs-drive.py header   COURSE QUIZ [--header FILE | --header-html HTML] [--footer FILE | --footer-html HTML] [--json] [--go]
     bs-drive.py visible  COURSE QUIZ [--hidden] [--go]
     bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--[no-]monitor] [--[no-]second-camera] [--[no-]proctored-lab] [--lockdown-password PW]
-                         [--[no-]lock-in] [--calculator standard|scientific|none]
+                         [--[no-]lock-in] [--[no-]for-results] [--calculator standard|scientific|none]
                          [--monitor-steps LIST] [--face-detection LIST] [--live-proctoring SYSTEM --live-code CODE] [--go]
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
     bs-drive.py import   COURSE FILE.csv --section NAME [--go]
@@ -496,6 +496,9 @@ PASSWORD = "findAll(e => e.tagName === 'INPUT' && e.id === 'testPassword')[0]"
 # exam is completed", and "Enable Calculator on the toolbar", which once ticked
 # offers a Standard and a Scientific one (2026-11-26).
 LOCK_IN = "findAll(e => e.tagName === 'INPUT' && e.id === 'lockIntoLDB')[0]"
+# "Require LockDown Browser to view post-exam feedback and results", its id
+# ending in the quiz's key; ticked on a quiz Respondus has just required.
+FOR_RESULTS = "findAll(e => e.tagName === 'INPUT' && e.type === 'checkbox' && e.id.startsWith('ldbRequiredForFeedback_'))[0]"
 CALC = "findAll(e => e.tagName === 'INPUT' && e.id === 'enableCalc')[0]"
 CALC_TYPE = {"standard": "basicCalc", "scientific": "scientificCalc"}
 BY_ID = "findAll(e => e.tagName === 'INPUT' && e.id === {})[0]"
@@ -523,6 +526,7 @@ def read_lockdown(p):
                         second_camera: !!({SECOND} || {{}}).checked,
                         lab: !!({LAB} || {{}}).checked,
                         lock_in: !!({LOCK_IN} || {{}}).checked,
+                        for_results: !!({FOR_RESULTS} || {{}}).checked,
                         calculator: !({CALC} || {{}}).checked ? 'none' :
                                     (({BY_ID.format(json.dumps(CALC_TYPE["scientific"]))} || {{}}).checked ? 'scientific' : 'standard'),
                         password: ({PASSWORD} || {{}}).value || '',
@@ -641,8 +645,8 @@ def verb_lockdown(a):
         sys.exit("live proctoring is instead of Respondus Monitor: --live-proctoring takes none of Monitor's flags")
     if a.off and a.lockdown_password is not None:
         sys.exit("--lockdown-password is LockDown Browser's, so --off takes none")
-    if a.off and (a.lock_in is not None or a.calculator is not None):
-        sys.exit("--lock-in and --calculator are LockDown Browser's, so --off takes neither")
+    if a.off and (a.lock_in is not None or a.calculator is not None or a.for_results is not None):
+        sys.exit("--lock-in, --for-results and --calculator are LockDown Browser's, so --off takes none of them")
     if a.calculator is not None and a.calculator not in ("none", *CALC_TYPE):
         sys.exit(f"--calculator: is standard, scientific or none, not {a.calculator!r}")
     if a.live_code is not None and not system:
@@ -661,7 +665,8 @@ def verb_lockdown(a):
             print(json.dumps(have)); return
         print(f"now: required={have['required']} external domains allowed={have['allow']} domains={have['domains']!r} "
               f"monitor={have['monitor']} second camera={have['second_camera']} proctored lab={have['lab']}"
-              f" exam password={have['password']!r} lock in={have['lock_in']} calculator={have['calculator']}"
+              f" exam password={have['password']!r} lock in={have['lock_in']} for results={have['for_results']}"
+              f" calculator={have['calculator']}"
               f" steps={','.join(have['steps']) or 'none'} face={','.join(have['face']) or 'none'}"
               + (f" system={have['system']} code={have['code']!r}" if have['monitor'] == 'live proctoring' else ""))
         if "\n" in (have["domains"] or ""):
@@ -673,6 +678,7 @@ def verb_lockdown(a):
                   + (f" proctored lab={a.proctored_lab}" if a.proctored_lab is not None else "")
                   + (f" exam password={a.lockdown_password!r}" if a.lockdown_password is not None else "")
                   + (f" lock in={a.lock_in}" if a.lock_in is not None else "")
+                  + (f" for results={a.for_results}" if a.for_results is not None else "")
                   + (f" calculator={a.calculator}" if a.calculator is not None else "")
                   + (f" steps={','.join(steps) or 'none'}" if steps is not None else "")
                   + (f" face={','.join(face) or 'none'}" if face is not None else "")
@@ -720,6 +726,8 @@ def verb_lockdown(a):
                 sys.exit(f"the box for {what} did not change; nothing saved")
         if not a.off and a.lock_in is not None:
             tick(LOCK_IN, a.lock_in, "locking students in until the exam is completed")
+        if not a.off and a.for_results is not None:
+            tick(FOR_RESULTS, a.for_results, "requiring LockDown Browser to view feedback and results")
         if not a.off and a.calculator is not None:
             tick(CALC, a.calculator != "none", "the calculator")
             if a.calculator != "none":
@@ -752,7 +760,8 @@ def verb_lockdown(a):
         b.close()
     print(f"checked on the server: required={got['required']} external domains allowed={got['allow']} domains={got['domains']!r} "
           f"monitor={got['monitor']} second camera={got['second_camera']} proctored lab={got['lab']}"
-          f" exam password={got['password']!r} lock in={got['lock_in']} calculator={got['calculator']}"
+          f" exam password={got['password']!r} lock in={got['lock_in']} for results={got['for_results']}"
+          f" calculator={got['calculator']}"
           f" steps={','.join(got['steps']) or 'none'} face={','.join(got['face']) or 'none'}"
           + (f" system={got['system']} code={got['code']!r}" if got['monitor'] == 'live proctoring' else ""))
     ok = (got["required"] is (not a.off)) and (a.off or (got["domains"] == domains and got["allow"] if domains
@@ -765,6 +774,8 @@ def verb_lockdown(a):
         ok &= got["password"] == a.lockdown_password
     if not a.off and a.lock_in is not None:
         ok &= got["lock_in"] is a.lock_in
+    if not a.off and a.for_results is not None:
+        ok &= got["for_results"] is a.for_results
     if not a.off and a.calculator is not None:
         ok &= got["calculator"] == a.calculator
     if not a.off and steps is not None:
@@ -1448,6 +1459,8 @@ def main():
                         "and needs the exam password")
     s.add_argument("--lock-in", dest="lock_in", action=argparse.BooleanOptionalAction,
                    help="lock students into the browser until the exam is completed")
+    s.add_argument("--for-results", dest="for_results", action=argparse.BooleanOptionalAction,
+                   help="require LockDown Browser to view post-exam feedback and results")
     s.add_argument("--calculator", metavar="standard|scientific|none", help="the calculator on LockDown's toolbar")
     s.add_argument("--lockdown-password", dest="lockdown_password", metavar="PASSWORD",
                    help="LockDown Browser's own password to access the exam, which the lab's proctor types in; "

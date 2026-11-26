@@ -3655,8 +3655,8 @@ def cmd_setup(args):
 # A quiz's keys: its brightspace: block, and setup-quiz's flags of the same names.
 QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
              "points", "grade_item", "description", "header", "footer", "shell", "calendar", "special_access_only",
-             "lockdown", "lockdown_domains", "lockdown_password", "lockdown_lock_in", "lockdown_calculator",
-             "monitor", "second_camera", "proctored_lab",
+             "lockdown", "lockdown_domains", "lockdown_password", "lockdown_lock_in", "lockdown_for_results",
+             "lockdown_calculator", "monitor", "second_camera", "proctored_lab",
              "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code",
              "shuffle_questions", "paging", "auto_publish", "primary_view", "additional_views", "visible")
 # The quiz's paging, as the YAML names it and as PagingTypeId holds it: read off
@@ -3738,7 +3738,7 @@ def check_value(key, value, at):
     if key == "paging":
         paging_code(value)
     if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "proctored_lab",
-               "shuffle_questions", "auto_publish", "lockdown_lock_in", "visible") \
+               "shuffle_questions", "auto_publish", "lockdown_lock_in", "lockdown_for_results", "visible") \
             and value.strip().lower() not in TRUTH | FALSITY:
         raise Failed(f"{at} {key}: is true or false, not {value!r}")
     for name, known in (("monitor_steps", MONITOR_STEPS), ("face_detection", FACE_OPTIONS)):
@@ -3925,8 +3925,8 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         plan["item"] = True
     plan["used"] = used
     for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only",
-                "lockdown", "lockdown_domains", "lockdown_password", "lockdown_lock_in", "lockdown_calculator",
-                "monitor", "second_camera", "proctored_lab",
+                "lockdown", "lockdown_domains", "lockdown_password", "lockdown_lock_in", "lockdown_for_results",
+                "lockdown_calculator", "monitor", "second_camera", "proctored_lab",
                 "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code",
                 "shuffle_questions", "paging", "auto_publish", "visible"):
         if key in plan:
@@ -3966,7 +3966,7 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     if as_flag(plan.get("proctored_lab")) and "lockdown_password" not in plan:
         raise Failed(f"{at} proctored_lab: needs lockdown_password:, the password the lab's proctor types in; "
                      "Respondus will not save a proctored lab without one")
-    for key in ("lockdown_password", "lockdown_lock_in", "lockdown_calculator"):
+    for key in ("lockdown_password", "lockdown_lock_in", "lockdown_for_results", "lockdown_calculator"):
         if key in plan:
             if "lockdown" in plan and not as_flag(plan["lockdown"]):
                 raise Failed(f"{at} {key}: is LockDown Browser's, and lockdown: false turns it off")
@@ -4079,6 +4079,8 @@ def quiz_summary(plan, template=None):
                        + (f", exam password {plan['lockdown_password']}" if "lockdown_password" in plan else "")
                        + ((", students locked in until done" if as_flag(plan["lockdown_lock_in"]) else
                            ", not locked in") if "lockdown_lock_in" in plan else "")
+                       + ((", results seen only in it" if as_flag(plan["lockdown_for_results"]) else
+                           ", results seen in any browser") if "lockdown_for_results" in plan else "")
                        + ((f", a {plan['lockdown_calculator']} calculator" if plan["lockdown_calculator"] != "none"
                            else ", no calculator") if "lockdown_calculator" in plan else ""))
                       if as_flag(plan["lockdown"]) else "LockDown Browser not required")
@@ -4165,6 +4167,9 @@ def quiz_remainder(plan, template, shown, done=()):
         if "lockdown_lock_in" in plan:
             password += ("; Advanced Settings -> " + ("" if as_flag(plan["lockdown_lock_in"]) else "don't ")
                          + "lock students into the browser until exam is completed")
+        if "lockdown_for_results" in plan:
+            password += ("; Advanced Settings -> " + ("" if as_flag(plan["lockdown_for_results"]) else "don't ")
+                         + "require LockDown Browser to view post-exam feedback and results")
         if "lockdown_calculator" in plan:
             password += ("; Advanced Settings -> " + (f"Enable Calculator on the toolbar, {plan['lockdown_calculator']}"
                                                       if plan["lockdown_calculator"] != "none" else
@@ -4302,6 +4307,9 @@ def check_quiz(s, ou, plan, by_hand=False):
                         row("exam password", plan["lockdown_password"], got.get("password") or "(none)")
                     if "lockdown_lock_in" in plan:
                         row("locked in until done", yes_no(as_flag(plan["lockdown_lock_in"])), yes_no(got.get("lock_in")))
+                    if "lockdown_for_results" in plan:
+                        row("results only in LockDown", yes_no(as_flag(plan["lockdown_for_results"])),
+                            yes_no(got.get("for_results")))
                     if "lockdown_calculator" in plan:
                         row("calculator", plan["lockdown_calculator"], got.get("calculator") or "(not read)")
                 if "live_proctoring" in plan or "monitor" in plan:
@@ -4394,7 +4402,9 @@ def lockdown_argv(ou, quiz, got):
     argv = ["lockdown", str(ou), str(quiz), "--go"]
     if got.get("allow") and (got.get("domains") or "").strip():
         argv += ["--domains", ", ".join(d.strip() for d in re.split(r"[,\n]", got["domains"]) if d.strip())]
-    argv += ["--lock-in" if got.get("lock_in") else "--no-lock-in", "--calculator", got.get("calculator") or "none"]
+    argv += ["--lock-in" if got.get("lock_in") else "--no-lock-in",
+             "--for-results" if got.get("for_results") else "--no-for-results",
+             "--calculator", got.get("calculator") or "none"]
     if got.get("password"):
         argv += ["--lockdown-password", got["password"]]
     if got.get("monitor") == "required":
@@ -4414,6 +4424,7 @@ def lockdown_line(got):
     n = len([d for d in re.split(r"[,\n]", got.get("domains") or "") if d.strip()]) if got.get("allow") else 0
     parts = [f"{n} site{'s' if n != 1 else ''} allowed" if n else "no other site allowed"]
     parts += (["students locked in until done"] if got.get("lock_in") else [])
+    parts += (["results seen only in it"] if got.get("for_results") else [])
     parts += ([f"a {got['calculator']} calculator"] if got.get("calculator") not in (None, "none") else [])
     parts += (["an exam password"] if got.get("password") else [])
     if got.get("monitor") == "required":
@@ -4483,6 +4494,8 @@ def drive_steps(plan, ou):
                           + (["--lockdown-password", plan["lockdown_password"]] if "lockdown_password" in plan else [])
                           + ([("--" if as_flag(plan["lockdown_lock_in"]) else "--no-") + "lock-in"]
                              if "lockdown_lock_in" in plan else [])
+                          + ([("--" if as_flag(plan["lockdown_for_results"]) else "--no-") + "for-results"]
+                             if "lockdown_for_results" in plan else [])
                           + (["--calculator", plan["lockdown_calculator"]] if "lockdown_calculator" in plan else [])
                           + ([("--" if as_flag(plan["monitor"]) else "--no-") + "monitor"] if "monitor" in plan else [])
                           + ([("--" if as_flag(plan["second_camera"]) else "--no-") + "second-camera"]
@@ -5468,6 +5481,8 @@ def main(argv=None):
                    help="LockDown Browser's own password to access the exam, which a lab's proctor types in")
     x.add_argument("--lockdown-lock-in", dest="lockdown_lock_in", action=argparse.BooleanOptionalAction,
                    help="lock students into LockDown Browser until the exam is completed")
+    x.add_argument("--lockdown-for-results", dest="lockdown_for_results", action=argparse.BooleanOptionalAction,
+                   help="require LockDown Browser to view post-exam feedback and results")
     x.add_argument("--lockdown-calculator", dest="lockdown_calculator", metavar="standard|scientific|none",
                    help="the calculator on LockDown Browser's toolbar")
     x.add_argument("--monitor-steps", dest="monitor_steps", metavar="'instructions, environment'",
