@@ -686,7 +686,7 @@ with start and end as times of day:
 |---|---|
 | `like` | The quiz its settings come from; `previous`, the one numbered before it, when left out. |
 | `start`, `end` | The times it opens and closes, on the quiz's date. |
-| `minutes`, `attempts`, `ip`, `password`, `points`, `grade_item`, `description` | As in a quiz's block. `header` and `footer` are a quiz's own and not defaults. |
+| `minutes`, `attempts`, `ip`, `password`, `points`, `grade_item`, `description`, `header`, `footer`, `shuffle_questions`, `paging` | As in a quiz's block, the three texts in Markdown. |
 | `shell` | Where its quizzes are made, to be copied into the sections. |
 | `sections` | For a course taught as several: the labels of its sections, the first of which its settings come from. |
 | `item_like` | The grade item each section's copy is shaped like, where the section has none of the quiz's name; `previous` by default. |

@@ -279,6 +279,8 @@ brightspace:
 | `start`, `end` | Local time, as `2026-10-06 12:30`; the end is its due date too. No dates when left out. |
 | `minutes` | A time limit, enforced, or `none` for a quiz with no timer, an exam. The copied quiz's when left out, unless the course's defaults name one. |
 | `attempts` | How many, or `unlimited`. 1 when left out. |
+| `shuffle_questions` | `true` puts the questions in a new order for each student, `false` keeps the file's; left out, the copied quiz's. A question's own `shuffle:` is about its options, not this. |
+| `paging` | How many questions to a page: `all`, `1`, `5`, `10`, or `sections`, a page break after each section; left out, the copied quiz's. |
 | `ip`, `password` | The addresses it can be taken from, as `148.137.150.0-148.137.150.255`, and a password. |
 | `points` | What its grade item is out of, when one is made. The copied item's when left out. |
 | `grade_item` | `none` for no grade item. Left out, the quiz goes to an item of its own name, made like the one `like` sends its scores to if there is none yet. |

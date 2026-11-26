@@ -945,6 +945,9 @@ if COOKIES_OK:
         has=["header: 0 chars -> ", "chars, displayed", "checked on the server: header, StartDate"])
     run("new-quiz", "240", "Whatever", "--ip", "nonsense", ok=False, has=["wants a range like"])
     run("new-quiz", "240", "Whatever", "--attempts", "lots", ok=False, has=["attempts: is a whole number, or unlimited"])
+    run("new-quiz", "240", "Ten to a page", "--paging", "10", "--shuffle-questions",
+        has=['"PagingTypeId": 4', '"Shuffle": true', "questions shuffled, paging"])
+    run("new-quiz", "240", "Whatever", "--paging", "2", ok=False, has=["paging: is all, 1, 5, 10 or sections"])
     run("new-quiz", "240", "Practice forever", "--attempts", "Unlimited",
         has=['"NumberOfAttemptsAllowed": null', "checked on the server: name, start, end, attempts"])
     t = run("new-folder", "240", "Assignment 5", "--like", "Assignment 4",
@@ -1394,6 +1397,8 @@ if COOKIES_OK:
                           ({"face_detection": "block", "monitor": "false"}, "face_detection: are Respondus Monitor's"),
                           ({"live_proctoring": "skype"}, "live_proctoring: is the video system"),
                           ({"attempts": "lots"}, "attempts: is a whole number, not 'lots' -- or unlimited"),
+                          ({"paging": "3"}, "paging: is all, 1, 5, 10 or sections"),
+                          ({"shuffle_questions": "maybe"}, "shuffle_questions:"),
                           ({"live_proctoring": "zoom", "second_camera": "true"}, "live_proctoring: is instead of Respondus Monitor"),
                           ({"live_proctoring_code": "abc"}, "the plan has no live_proctoring:"),
                           ({"proctored_lab": "true", "monitor": "false", "lockdown_password": "x"},
@@ -1440,6 +1445,11 @@ if COOKIES_OK:
             has=["Respondus Monitor required, startup steps: instructions, environment, face detection: notify",
                  "Require Respondus Monitor; Startup Sequence: on, instructions, environment, the rest off; "
                  "Face Detection Options: on, notify, the rest off"])
+        # The questions' order and how many to a page, in the payload that makes the quiz.
+        run("setup-quiz", quiz_yml("q26.yml", name="Quiz 26", shuffle_questions="true", paging="1"),
+            has=["questions shuffled; 1 question per page", '"Shuffle": true', '"PagingTypeId": 1'])
+        run("setup-quiz", quiz_yml("q26.yml", name="Quiz 26", paging="Sections"), "--no-shuffle-questions",
+            has=["questions in order; a page break after each section", '"Shuffle": false', '"PagingTypeId": 2'])
         # Unlimited attempts: null to the API, IsUnlimited when read back.
         run("setup-quiz", quiz_yml("q25.yml", name="Quiz 25", attempts="unlimited"),
             has=["8 minutes, unlimited attempts", '"NumberOfAttemptsAllowed": null'])

@@ -1696,6 +1696,7 @@ def cmd_quiz(args):
         ("grade item", q.get("GradeItemId") or "not attached to the gradebook"),
         ("category", q.get("CategoryId") or "none"),
         ("shuffled", yes_no(q.get("Shuffle"))),
+        ("paging", PAGING_LABELS.get(q.get("PagingTypeId"), str(q.get("PagingTypeId")))),
         ("in the calendar", yes_no(q.get("DisplayInCalendar"))),
     ]
     print(q.get("Name", "?"))
@@ -2279,6 +2280,14 @@ def attempts_allowed(text):
     return int(text)
 
 
+def paging_code(name):
+    """A paging name, all, 1, 5, 10 or sections, as its PagingTypeId."""
+    key = str(name).strip().lower()
+    if key not in PAGING:
+        raise Failed(f"paging: is all, 1, 5, 10 or sections (questions per page, or a page per section), not {name!r}")
+    return PAGING[key]
+
+
 def attempts_of(q):
     """A quiz's attempts as a person reads them: the number, or unlimited."""
     a = q.get("AttemptsAllowed")
@@ -2499,6 +2508,11 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
         "GradeItemId": None,
         "RestrictIPAddressRange": [],
     }
+    # The order of the questions and how many to a page: the template's unless asked.
+    if getattr(args, "shuffle_questions", None) is not None:
+        payload["Shuffle"] = as_flag(args.shuffle_questions)
+    if getattr(args, "paging", None) is not None:
+        payload["PagingTypeId"] = paging_code(args.paging)
     # A timer only when --minutes asks for one; otherwise the template's limit,
     # enforced or not, as read. --minutes defaulted to 50 until 2026-10-01, so a
     # quiz copied from Midterm Part 1, which has no timer, came out with an
@@ -2560,6 +2574,8 @@ def make_quiz(args, description=None, item_hint="--grade-item attaches one", tem
         ("end", payload["EndDate"], back.get("EndDate")),
         ("attempts", "unlimited" if payload["NumberOfAttemptsAllowed"] is None
          else str(payload["NumberOfAttemptsAllowed"]), attempts_of(back)),
+        ("questions shuffled", bool(payload.get("Shuffle")), bool(back.get("Shuffle"))),
+        ("paging", payload.get("PagingTypeId"), back.get("PagingTypeId")),
         ("time limit", limit_of(payload.get("SubmissionTimeLimit")), limit_of(back.get("SubmissionTimeLimit"))),
         ("IP range", ips(payload["RestrictIPAddressRange"]), ips(back.get("RestrictIPAddressRange"))),
         ("password", bool(args.password), bool(back.get("Password"))),
@@ -3247,7 +3263,14 @@ def cmd_setup(args):
 QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
              "points", "grade_item", "description", "header", "footer", "shell", "calendar", "special_access_only",
              "lockdown", "lockdown_domains", "lockdown_password", "monitor", "second_camera", "proctored_lab",
-             "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code", "visible")
+             "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code",
+             "shuffle_questions", "paging", "visible")
+# The quiz's paging, as the YAML names it and as PagingTypeId holds it: read off
+# the editor's menu for each code in the 120 Devshell, 2026-11-25; 5 and up are
+# refused, "PagingTypeId must be between 0 and 4".
+PAGING = {"all": 0, "1": 1, "sections": 2, "5": 3, "10": 4}
+PAGING_LABELS = {0: "all questions together", 1: "1 question per page", 2: "a page break after each section",
+                 3: "5 questions per page", 4: "10 questions per page"}
 # The three texts a quiz carries in Markdown, each kept as written, indentation
 # and all, since a fenced program inside one keeps its spaces.
 TEXT_KEYS = ("description", "header", "footer")
@@ -3318,7 +3341,10 @@ def check_value(key, value, at):
         raise Failed(f"{at} {key}: is a whole number, not {value!r}"
                      + (" -- or none, for a quiz with no time limit" if key == "minutes" else
                         " -- or unlimited"))
-    if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "proctored_lab", "visible") \
+    if key == "paging":
+        paging_code(value)
+    if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "proctored_lab",
+               "shuffle_questions", "visible") \
             and value.strip().lower() not in TRUTH | FALSITY:
         raise Failed(f"{at} {key}: is true or false, not {value!r}")
     for name, known in (("monitor_steps", MONITOR_STEPS), ("face_detection", FACE_OPTIONS)):
@@ -3400,7 +3426,7 @@ def quiz_defaults(path=None):
             if key != "grade_item" and value.strip() in fmt.NONE:
                 continue
             check_default(key, value, at)
-            out[label][key] = value if key == "description" else value.strip()
+            out[label][key] = value if key in TEXT_KEYS else value.strip()
     return out
 
 
@@ -3408,8 +3434,8 @@ def check_default(key, value, at):
     if key in ("start", "end"):
         if not time_of_day(value):
             raise Failed(f"{at} {key}: is a time of day like 14:00, not {value!r}")
-    elif key == "description":
-        quiz_format().md_html(value, f"{at} description")
+    elif key in TEXT_KEYS:
+        quiz_format().md_html(value, f"{at} {key}")
     else:
         check_value(key, value.strip(), at)
 
@@ -3486,7 +3512,8 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
     plan["used"] = used
     for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only",
                 "lockdown", "lockdown_domains", "lockdown_password", "monitor", "second_camera", "proctored_lab",
-                "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code", "visible"):
+                "monitor_steps", "face_detection", "live_proctoring", "live_proctoring_code",
+                "shuffle_questions", "paging", "visible"):
         if key in plan:
             check_value(key, plan[key], at)
     if "lockdown_domains" in plan:
@@ -3628,6 +3655,10 @@ def quiz_summary(plan, template=None):
                        + (f", startup steps: {plan['monitor_steps']}" if "monitor_steps" in plan else "")
                        + (f", face detection: {plan['face_detection']}" if "face_detection" in plan else ""))
                       if as_flag(plan["monitor"]) else "Respondus Monitor not required")
+    if "shuffle_questions" in plan:
+        extras.append("questions shuffled" if as_flag(plan["shuffle_questions"]) else "questions in order")
+    if "paging" in plan:
+        extras.append(PAGING_LABELS[paging_code(plan["paging"])])
     if "visible" in plan:
         extras.append("made visible once its questions are in" if as_flag(plan["visible"]) else "left hidden")
     if extras:
@@ -3741,6 +3772,11 @@ def check_quiz(s, ou, plan, by_hand=False):
                 f"{minutes} minutes" if on else "(none)",
                 "minutes" not in plan or (on and str(minutes) == plan["minutes"]))
         row("attempts", str(plan.get("attempts", "1")).lower(), attempts_of(q))
+        if "shuffle_questions" in plan:
+            row("questions shuffled", yes_no(as_flag(plan["shuffle_questions"])), yes_no(q.get("Shuffle")))
+        if "paging" in plan:
+            row("paging", PAGING_LABELS[paging_code(plan["paging"])],
+                PAGING_LABELS.get(q.get("PagingTypeId"), str(q.get("PagingTypeId"))))
         ips = [f"{r.get('IPRangeStart')}-{r.get('IPRangeEnd')}" for r in q.get("RestrictIPAddressRange") or []]
         row("IP range", re.sub(r"\s+", "", plan.get("ip", "")) or "(none)", ", ".join(ips) or "(none)")
         row("password", plan.get("password", "(none)"), q.get("Password") or "(none)")
@@ -4045,6 +4081,7 @@ def cmd_setup_quiz(args):
             attach = plan["name"] if args.go else None
     made = make_quiz(argparse.Namespace(**common, like=None, start=plan.get("start"), end=plan.get("end"),
                                  minutes=plan.get("minutes"), attempts=plan.get("attempts", "1"),
+                                 shuffle_questions=plan.get("shuffle_questions"), paging=plan.get("paging"),
                                  ip=plan.get("ip"), password=plan.get("password"), grade_item=attach,
                                  calendar=plan.get("calendar"), special_access_only=plan.get("special_access_only"),
                                  active=False),
@@ -4758,6 +4795,9 @@ def main(argv=None):
     x.add_argument("--end", help="local time, '2026-09-29 13:25'")
     x.add_argument("--minutes", help="enforced time limit, or none for no timer; without it, --like's limit is kept as it is")
     x.add_argument("--attempts", default=1, help="a whole number, or unlimited")
+    x.add_argument("--shuffle-questions", dest="shuffle_questions", action=argparse.BooleanOptionalAction,
+                   help="the questions in a new order for each student; without either, --like's")
+    x.add_argument("--paging", help="questions to a page: all, 1, 5, 10, or sections; without it, --like's")
     x.add_argument("--ip", help="allowed range, '148.137.150.0-148.137.150.255'")
     x.add_argument("--password")
     x.add_argument("--like", help="an existing quiz to copy the settings from")
@@ -4849,6 +4889,9 @@ def main(argv=None):
     x.add_argument("--minutes", help="enforced time limit, or none for no timer; without it, the copied quiz's, "
                                      "unless the course's defaults say otherwise")
     x.add_argument("--attempts", help="a whole number, or unlimited")
+    x.add_argument("--shuffle-questions", dest="shuffle_questions", action=argparse.BooleanOptionalAction,
+                   help="the questions in a new order for each student; without either, the copied quiz's")
+    x.add_argument("--paging", help="questions to a page: all, 1, 5, 10, or sections; without it, the copied quiz's")
     x.add_argument("--points", help="what its grade item is out of")
     x.add_argument("--like", help="the quiz to copy the settings from (default: the one numbered before it)")
     x.add_argument("--ip", help="allowed range, '148.137.150.0-148.137.150.255'")
