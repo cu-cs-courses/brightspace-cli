@@ -873,7 +873,8 @@ def job_page(job):
     out = job.output()
     took = int((job.ended or time.time()) - job.started)
     clock = f"{took // 60}:{took % 60:02d}"
-    back = f'/quizzes?as={urllib.parse.quote(job.profile)}#make-it'
+    copying = job.line.startswith("brightspace.py copy-quiz")
+    back = f'/quizzes?as={urllib.parse.quote(job.profile)}#{"copy-it" if copying else "make-it"}'
     if job.code is None:
         head = '<meta http-equiv="refresh" content="3">'
         body = (f'<section class="result"><h2>Running, {clock} so far</h2><p><code>{esc(job.line)}</code></p>'
@@ -885,8 +886,10 @@ def job_page(job):
         if code < 0:
             verdict, good = f"Stopped after {clock}: it ran longer than {JOB_LIMIT // 60} minutes", False
         elif code:
-            verdict, good = ("Not what the plan says, or not compared: below is why" if job.action == "check"
-                             else "Stopped"), False
+            verdict, good = ("Not what the plan says, or not compared: below is why"
+                             if job.action == "check" and not copying else "Stopped"), False
+        elif copying:
+            verdict, good = ("Copied" if job.action == "copy" else "Checked: nothing sent"), True
         else:
             verdict, good = {"go": "Made", "check": "Brightspace has what the plan says"}.get(
                 job.action, "Checked: nothing sent"), True
@@ -937,8 +940,12 @@ def run_make(form, profile, owner=None):
     return command(argv, profile)
 
 
-def run_copy(form, profile):
-    """copy-quiz for the copy form."""
+def run_copy(form, profile, owner=None):
+    """copy-quiz for the copy form, as a job: since 2026-11-26 it carries the
+    shell quiz's LockDown settings onto each copy in a browser, a minute or two
+    a section, and a request that waits for it outlasts Cloudflare's hundred
+    seconds. Julia's first copy of a quiz in LockDown, into 115-01, finished
+    behind a Cloudflare timeout page, its output lost with the reply."""
     labels = labels_of(profile)
     def course(value):
         if value in labels or re.fullmatch(r"\d+", value or ""):
@@ -955,7 +962,7 @@ def run_copy(form, profile):
         argv.append("--go")
         if form.get("clear"):
             argv.append("--clear")
-    return command(argv, profile)
+    return Job.start(owner, profile, argv, form=form)
 
 
 class NotLoaded(ValueError):
@@ -1141,8 +1148,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 else:
                     line, code, output, csv = ran
             elif where == "/copy-quiz":
-                line, code, output = run_copy(form, profile)
-                form["from"] = form.get("shell", "")
+                job = run_copy(form, profile, owner=self.email)
+                self.send_response(303)
+                self.send_header("Location", f"/job?id={job.id}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             elif action == "load":
                 return self.reply(200, page(profiles, profile, tab, form, edit=form.get("dcourse", "").strip(),
                                             fresh=True))

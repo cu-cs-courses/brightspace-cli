@@ -1218,7 +1218,8 @@ if COOKIES_OK:
               fetch(wport, here, "/copy-quiz", {"token": token, "shell": "shell", "to": ["240"],
                                                 "item_like": "Assignment 1", "action": "check"}), 200,
               has=["Checked: nothing sent", "brightspace.py copy-quiz shell --to 240 --item-like=&#x27;Assignment 1&#x27;",
-                   "into 240: attached to a new grade item", "nothing sent; --go copies it"])
+                   "into 240: attached to a new grade item", "nothing sent; --go copies it",
+                   "#copy-it\">Back to Quizzes</a>"])     # a job, on its own page: no request waits for it
     proc.terminate(); proc.wait()
 
     # Behind Cloudflare Access: a token Access signed, checked here. An RSA key of
