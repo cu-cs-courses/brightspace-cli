@@ -650,11 +650,11 @@ def to_csv(data, where, msa_as_sa=False):
     # One key takes a list: lockdown_domains, the sites LockDown Browser lets a
     # student open, which reads best one to a line.
     if not isinstance(block, (dict, type(None))) or any(
-            not (isinstance(v, str) or (k == "lockdown_domains" and isinstance(v, list)
+            not (isinstance(v, str) or (k in ("lockdown_domains", "monitor_steps", "face_detection") and isinstance(v, list)
                                         and all(isinstance(x, str) for x in v)))
             for k, v in (block or {}).items()):
         raise Failed(f"{where}: `brightspace:` is a block of `key: value` lines, each value text, "
-                     "but lockdown_domains, which may be a list")
+                     "but lockdown_domains, monitor_steps and face_detection, which may be lists")
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
     for n, q in enumerate(data["questions"], 1):

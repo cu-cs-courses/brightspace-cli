@@ -70,8 +70,17 @@ and warns when the stored value holds a newline. `--off` sets *Not Required*.
 `--monitor` requires **Respondus Monitor**, the webcam, in the section below,
 and `--no-monitor` does not; `--second-camera` ticks *Require students use a
 second camera in addition to the webcam*, under Monitor's *Second Camera*,
-and implies `--monitor`. Without any of the three, Monitor is left as it is;
-the readback, and `--json`, carry it either way.
+and implies `--monitor`. `--monitor-steps 'instructions, environment'` puts
+on exactly those of the startup sequence's steps that can be left out
+(`instructions`, `guidelines`, `photo`, `id`, `environment`) and the rest off,
+or `none`; `--face-detection` does the same for `block` and `notify`; each
+implies `--monitor`. `--live-proctoring zoom --live-code pe2-zoom` chooses
+*Allow instructor live proctoring* instead of Monitor, with its video system
+(`zoom`, `teams`, `google meet`, `collaborate`, `webex`, `other`) and its start
+code. Without any of these, proctoring is left as it is; the readback, and
+`--json`, carry all of it either way. Switching a quiz to live proctoring
+resets Monitor's startup steps to Respondus's own, every one on (2026-11-25),
+so a quiz going back to Monitor names its steps again.
 
 **`special-access`** opens *Availability Dates & Conditions → Manage Special
 Access*, and if the user is not on the list, *Add Users to Special Access*,
@@ -236,7 +245,12 @@ the same things.
   `monitorEnabledFalse_` and `liveProctoringEnabled_` (an instructor
   proctoring over Zoom, Teams and the like); the startup sequence's boxes
   (`FACE_PIC_CHECK_ENABLED`, `ID_CHECK_ENABLED`, `ENV_CHECK_ENABLED` and the
-  rest); and, folded under the *Second Camera* section after Monitor's own
+  rest, ids `ADDITIONAL_INSTRUCTIONS_ENABLED`, `VIDEO_GUIDELINES_ENABLED`,
+  `FACE_PIC_CHECK_ENABLED`, `ID_CHECK_ENABLED`, `ENV_CHECK_ENABLED`); face
+  detection's `forceFacialDetection` and `notifyFacialDetectionLoss`; live
+  proctoring's `liveProctoringSystem` menu (`ZOOM`, `TEAMS`, `GOOGLEMEET`,
+  `BBCOLLABORATE`, `WEBEX`, `OTHER`), set by its value and a change event, and
+  its `liveProctoringCode`; and, folded under the *Second Camera* section after Monitor's own
   *Advanced Settings*, `secondCameraEnabled`. **Choosing Monitor for the
   first time on a course opens Respondus's introduction over the page**, and
   every click lands on it until its *Continue to Respondus Monitor >>* closes

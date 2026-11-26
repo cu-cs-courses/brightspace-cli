@@ -375,7 +375,10 @@ refuses("list.yml", "brightspace:\n- Quiz 4\nquestions:\n- type: SA\n  text: Hi.
 refuses("nested.yml", "brightspace:\n  name:\n    first: Quiz\nquestions:\n- type: SA\n  text: Hi.\n  answers: [x]\n",
         "each value text")
 refuses("listed.yml", "brightspace:\n  name: [Quiz, 4]\nquestions:\n- type: SA\n  text: Hi.\n  answers: [x]\n",
-        "but lockdown_domains, which may be a list")
+        "but lockdown_domains, monitor_steps and face_detection, which may be lists")
+yml("steps.yml", "brightspace:\n  name: Quiz 4\n  monitor_steps:\n  - instructions\n  - environment\n"
+                "  face_detection: [notify]\nquestions:\n- type: SA\n  text: Hi.\n  answers: [x]\n")
+run("steps.yml", has=["wrote"])
 yml("sites.yml", "brightspace:\n  name: Quiz 4\n  lockdown_domains:\n  - a.org\n  - b.edu\n"
                 "questions:\n- type: SA\n  text: Hi.\n  answers: [x]\n")
 run("sites.yml", has=["wrote"])

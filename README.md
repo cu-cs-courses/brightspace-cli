@@ -457,12 +457,15 @@ for `Quiz 6`, or else from the course's last quiz.
 
 **LockDown, Respondus Monitor and visibility are keys of the block**,
 `lockdown`, `lockdown_domains`, `monitor` (the webcam, which takes LockDown),
-`second_camera` (which takes Monitor) and `visible`, flags of the same names, and `--go` takes
+`second_camera`, `monitor_steps` and `face_detection` (which take Monitor),
+`live_proctoring` and `live_proctoring_code` (an instructor over Zoom and the
+like, instead of Monitor) and `visible`, flags of the same names, and `--go` takes
 every step the API has no route for through
 [`extras/bs-drive/`](extras/bs-drive/README.md) when `chromium` is on `PATH`
 and Python has `websocket-client`: the questions in, the blanks, the options
 shuffled, Add Existing,
-LockDown and its sites, Monitor and its second camera, then the quiz shown. `--by-hand`, or
+LockDown and its sites, Monitor with its steps and second camera or live
+proctoring, then the quiz shown. `--by-hand`, or
 `BRIGHTSPACE_BY_HAND` set, prints them instead. The web page takes the same
 steps, as a job it shows running (below). Respondus renames a quiz it
 guards, *Quiz 9- Requires Respondus LockDown Browser*, and with Monitor

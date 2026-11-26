@@ -3227,7 +3227,13 @@ def cmd_setup(args):
 # A quiz's keys: its brightspace: block, and setup-quiz's flags of the same names.
 QUIZ_KEYS = ("course", "name", "date", "like", "start", "end", "minutes", "attempts", "ip", "password",
              "points", "grade_item", "description", "shell", "calendar", "special_access_only",
-             "lockdown", "lockdown_domains", "monitor", "second_camera", "visible")
+             "lockdown", "lockdown_domains", "monitor", "second_camera", "monitor_steps", "face_detection",
+             "live_proctoring", "live_proctoring_code", "visible")
+# Respondus Monitor's startup steps that can be left out, face detection's two
+# options, and live proctoring's video systems: bs-drive's names for them.
+MONITOR_STEPS = ("instructions", "guidelines", "photo", "id", "environment")
+FACE_OPTIONS = ("block", "notify")
+LIVE_SYSTEMS = ("zoom", "teams", "google meet", "collaborate", "webex", "other")
 # Respondus appends this to the name of a quiz it guards, so a quiz set up with
 # lockdown: true is found by either name afterwards.
 LOCKDOWN_SUFFIX = "- Requires Respondus LockDown Browser"
@@ -3290,6 +3296,18 @@ def check_value(key, value, at):
     if key in ("calendar", "special_access_only", "lockdown", "monitor", "second_camera", "visible") \
             and value.strip().lower() not in TRUTH | FALSITY:
         raise Failed(f"{at} {key}: is true or false, not {value!r}")
+    for name, known in (("monitor_steps", MONITOR_STEPS), ("face_detection", FACE_OPTIONS)):
+        if key == name:
+            names = [x.strip().lower() for x in value.split(",") if x.strip()]
+            bad = [x for x in names if x not in known] if names != ["none"] else []
+            if not names or bad:
+                raise Failed(f"{at} {name}: are some of {', '.join(known)}, as a list or one line with commas, "
+                             f"or none, not {', '.join(map(repr, bad)) if bad else repr(value)}")
+    if key == "live_proctoring" and value.strip().lower() not in LIVE_SYSTEMS:
+        raise Failed(f"{at} live_proctoring: is the video system an instructor proctors over, one of "
+                     f"{', '.join(LIVE_SYSTEMS)}, not {value!r}; monitor: false turns proctoring off")
+    if key == "live_proctoring_code" and not value.strip():
+        raise Failed(f"{at} live_proctoring_code: is the start code students are given, and is empty")
     if key == "lockdown_domains":
         hosts = domain_list(value)
         bad = [h for h in hosts if not HOST.fullmatch(h)]
@@ -3402,10 +3420,11 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         except fmt.Failed as e:
             raise Failed(str(e))
         block = data.get("brightspace") or {}
-        if isinstance(block, dict) and isinstance(block.get("lockdown_domains"), list):
-            # a YAML list is the natural way to write several hosts; the rest of the
-            # plan carries values as text, so it is one line with commas from here
-            block = dict(block, lockdown_domains=", ".join(str(x).strip() for x in block["lockdown_domains"]))
+        # a YAML list is the natural way to write several hosts, or steps; the rest of
+        # the plan carries values as text, so each is one line with commas from here
+        for key in ("lockdown_domains", "monitor_steps", "face_detection"):
+            if isinstance(block, dict) and isinstance(block.get(key), list):
+                block = dict(block, **{key: ", ".join(str(x).strip() for x in block[key])})
         if not block and "course" not in flags:
             raise Failed(f"{path} has no brightspace: block to say which course the quiz goes in and when "
                          "it runs; extras/bs-yaml-quiz/README.md has its keys")
@@ -3438,7 +3457,8 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         plan["item"] = True
     plan["used"] = used
     for key in ("date", "minutes", "attempts", "points", "ip", "calendar", "special_access_only",
-                "lockdown", "lockdown_domains", "monitor", "second_camera", "visible"):
+                "lockdown", "lockdown_domains", "monitor", "second_camera", "monitor_steps", "face_detection",
+                "live_proctoring", "live_proctoring_code", "visible"):
         if key in plan:
             check_value(key, plan[key], at)
     if "lockdown_domains" in plan:
@@ -3453,6 +3473,24 @@ def quiz_plan(path=None, flags=None, defaults_path=None):
         if "monitor" in plan and not as_flag(plan["monitor"]):
             raise Failed(f"{at} second_camera: is Respondus Monitor's, and monitor: false turns Monitor off")
         plan.setdefault("monitor", "true")
+    for key in ("monitor_steps", "face_detection"):
+        if key in plan:
+            if "monitor" in plan and not as_flag(plan["monitor"]):
+                raise Failed(f"{at} {key}: are Respondus Monitor's, and monitor: false turns Monitor off")
+            plan[key] = ", ".join(x.strip().lower() for x in plan[key].split(",") if x.strip())
+            plan.setdefault("monitor", "true")
+    # Live proctoring, an instructor watching over Zoom or the like, is instead of
+    # Monitor, inside LockDown Browser as Monitor is.
+    if "live_proctoring" in plan:
+        if "monitor" in plan and as_flag(plan["monitor"]):
+            raise Failed(f"{at} live_proctoring: is instead of Respondus Monitor, and the plan has Monitor "
+                         "(monitor:, second_camera:, monitor_steps: or face_detection:)")
+        plan["live_proctoring"] = plan["live_proctoring"].strip().lower()
+        if "lockdown" in plan and not as_flag(plan["lockdown"]):
+            raise Failed(f"{at} live_proctoring: runs inside LockDown Browser, and lockdown: false turns it off")
+        plan.setdefault("lockdown", "true")
+    if "live_proctoring_code" in plan and "live_proctoring" not in plan:
+        raise Failed(f"{at} live_proctoring_code: is live proctoring's start code, and the plan has no live_proctoring:")
     if "monitor" in plan and as_flag(plan["monitor"]):
         if "lockdown" in plan and not as_flag(plan["lockdown"]):
             raise Failed(f"{at} monitor: Respondus Monitor runs inside LockDown Browser, "
@@ -3538,9 +3576,14 @@ def quiz_summary(plan, template=None):
         extras.append(("LockDown Browser required, " + (f"{n} site{'s' if n != 1 else ''} allowed" if n
                                                         else "no other site allowed"))
                       if as_flag(plan["lockdown"]) else "LockDown Browser not required")
-    if "monitor" in plan:
+    if "live_proctoring" in plan:
+        extras.append(f"live proctoring over {plan['live_proctoring'].title()}"
+                      + (f", start code {plan['live_proctoring_code']}" if "live_proctoring_code" in plan else ""))
+    elif "monitor" in plan:
         extras.append(("Respondus Monitor required" + (", with a second camera" if as_flag(plan.get("second_camera"))
-                                                       else ""))
+                                                       else "")
+                       + (f", startup steps: {plan['monitor_steps']}" if "monitor_steps" in plan else "")
+                       + (f", face detection: {plan['face_detection']}" if "face_detection" in plan else ""))
                       if as_flag(plan["monitor"]) else "Respondus Monitor not required")
     if "visible" in plan:
         extras.append("made visible once its questions are in" if as_flag(plan["visible"]) else "left hidden")
@@ -3578,12 +3621,19 @@ def quiz_remainder(plan, template, shown, done=()):
                  "    into the Question Library and added with Add Existing."]
     if "lockdown" in plan and "lockdown" not in done:
         monitor = ""
-        if "monitor" in plan:
+        if "live_proctoring" in plan:
+            monitor = (f"; Allow instructor live proctoring -> {plan['live_proctoring'].title()}"
+                       + (f", start code {plan['live_proctoring_code']}" if "live_proctoring_code" in plan else ""))
+        elif "monitor" in plan:
             monitor = ("; Require Respondus Monitor" + ("; Monitor's Second Camera -> Require students use a second "
                                                        "camera" if as_flag(plan.get("second_camera")) else
                                                        "; Monitor's Second Camera -> not required"
                                                        if "second_camera" in plan else "")
                        if as_flag(plan["monitor"]) else "; Don't require Respondus Monitor")
+            if as_flag(plan["monitor"]) and "monitor_steps" in plan:
+                monitor += f"; Startup Sequence: on, {plan['monitor_steps']}, the rest off"
+            if as_flag(plan["monitor"]) and "face_detection" in plan:
+                monitor += f"; Face Detection Options: on, {plan['face_detection']}, the rest off"
         steps.append(("LockDown Browser tab -> the quiz's row -> Settings -> Require LockDown Browser" + monitor
                       + (f"; Advanced Settings -> allow access to external domains, one line with commas:\n"
                          f"    {plan['lockdown_domains']}" if plan.get("lockdown_domains") else ".")
@@ -3681,9 +3731,20 @@ def check_quiz(s, ou, plan, by_hand=False):
                 if as_flag(plan["lockdown"]):
                     have = (got.get("domains") or "") if got.get("allow") else ""
                     row("LockDown sites", plan.get("lockdown_domains") or "(none)", have or "(none)")
-                if "monitor" in plan:
-                    row("Respondus Monitor", "required" if as_flag(plan["monitor"]) else "not required",
-                        got.get("monitor") or "(not read)")
+                if "live_proctoring" in plan or "monitor" in plan:
+                    row("proctoring", "live proctoring" if "live_proctoring" in plan else
+                        "Respondus Monitor" if as_flag(plan["monitor"]) else "none",
+                        {"required": "Respondus Monitor", "not required": "none"}.get(got.get("monitor"),
+                                                                                      got.get("monitor") or "(not read)"))
+                if "live_proctoring" in plan:
+                    row("video system", plan["live_proctoring"], got.get("system") or "(none)")
+                if "live_proctoring_code" in plan:
+                    row("start code", plan["live_proctoring_code"], got.get("code") or "(none)")
+                for key, what in (("monitor_steps", "startup steps"), ("face_detection", "face detection")):
+                    if key in plan:
+                        want = sorted(x for x in plan[key].split(", ") if x != "none")
+                        have = sorted(got.get({"monitor_steps": "steps", "face_detection": "face"}[key]) or [])
+                        row(what, ", ".join(want) or "none", ", ".join(have) or "none", want == have)
                 if "second_camera" in plan:
                     row("second camera", yes_no(as_flag(plan["second_camera"])), yes_no(got.get("second_camera")))
     if plan["csv_state"]:
@@ -3753,7 +3814,11 @@ def drive_steps(plan, ou):
                           + (["--domains", plan["lockdown_domains"]] if plan.get("lockdown_domains") else [])
                           + ([("--" if as_flag(plan["monitor"]) else "--no-") + "monitor"] if "monitor" in plan else [])
                           + ([("--" if as_flag(plan["second_camera"]) else "--no-") + "second-camera"]
-                             if "second_camera" in plan else [])))
+                             if "second_camera" in plan else [])
+                          + (["--monitor-steps", plan["monitor_steps"]] if "monitor_steps" in plan else [])
+                          + (["--face-detection", plan["face_detection"]] if "face_detection" in plan else [])
+                          + (["--live-proctoring", plan["live_proctoring"]] if "live_proctoring" in plan else [])
+                          + (["--live-code", plan["live_proctoring_code"]] if "live_proctoring_code" in plan else [])))
         else:
             steps.append(("lockdown", ["lockdown", str(ou), plan["name"], "--off", "--go"]))
     return steps
@@ -4690,6 +4755,14 @@ def main(argv=None):
                    help="require Respondus Monitor, the webcam, or with --no-monitor not; it takes LockDown")
     x.add_argument("--second-camera", dest="second_camera", action=argparse.BooleanOptionalAction,
                    help="require a second camera, a phone, which is Monitor's")
+    x.add_argument("--monitor-steps", dest="monitor_steps", metavar="'instructions, environment'",
+                   help="Monitor's startup steps on, the rest off: " + ", ".join(MONITOR_STEPS) + "; or none")
+    x.add_argument("--face-detection", dest="face_detection", metavar="'block, notify'",
+                   help="Monitor's face detection options on: block (no start), notify (during); or none")
+    x.add_argument("--live-proctoring", dest="live_proctoring", metavar="SYSTEM",
+                   help="an instructor proctoring over " + ", ".join(LIVE_SYSTEMS) + ", instead of Monitor")
+    x.add_argument("--live-proctoring-code", dest="live_proctoring_code", metavar="CODE",
+                   help="live proctoring's start code")
     x.add_argument("--visible", action=argparse.BooleanOptionalAction,
                    help="show it to students once its questions are in, or with --no-visible leave it hidden")
     x.add_argument("--by-hand", dest="by_hand", action="store_true",

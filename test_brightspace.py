@@ -1386,7 +1386,12 @@ if COOKIES_OK:
                            "lockdown_domains: are the sites LockDown Browser lets a student open"),
                           ({"monitor": "webcam"}, "monitor: is true or false, not 'webcam'"),
                           ({"monitor": "true", "lockdown": "false"}, "Respondus Monitor runs inside LockDown Browser"),
-                          ({"second_camera": "true", "monitor": "false"}, "second_camera: is Respondus Monitor's")]:
+                          ({"second_camera": "true", "monitor": "false"}, "second_camera: is Respondus Monitor's"),
+                          ({"monitor_steps": "photo, selfie"}, "monitor_steps: are some of instructions, guidelines"),
+                          ({"face_detection": "block", "monitor": "false"}, "face_detection: are Respondus Monitor's"),
+                          ({"live_proctoring": "skype"}, "live_proctoring: is the video system"),
+                          ({"live_proctoring": "zoom", "second_camera": "true"}, "live_proctoring: is instead of Respondus Monitor"),
+                          ({"live_proctoring_code": "abc"}, "the plan has no live_proctoring:")]:
             run("setup-quiz", quiz_yml("bad.yml", **({"name": "Quiz 16"} | keys)), ok=False, has=[why],
                 lacks=["Traceback"])
         # LockDown and visibility: keys of the block, flags of the same names. Here,
@@ -1417,6 +1422,19 @@ if COOKIES_OK:
             lacks=["with a second camera"])
         run("setup-quiz", quiz_yml("q22.yml", name="Quiz 22", lockdown="true"), "--no-monitor",
             has=["Respondus Monitor not required", "Don't require Respondus Monitor"])
+        # Monitor's startup steps and face detection, as lists or a line; and live
+        # proctoring, instead of Monitor, over a video system with its start code.
+        q23 = pathlib.Path(quiz_yml("q23.yml", name="Quiz 23", face_detection="notify"))
+        q23.write_text(q23.read_text().replace("  face_detection: notify\n", "  face_detection: notify\n  monitor_steps:\n"
+                                               "  - instructions\n  - Environment\n"))
+        run("setup-quiz", str(q23),
+            has=["Respondus Monitor required, startup steps: instructions, environment, face detection: notify",
+                 "Require Respondus Monitor; Startup Sequence: on, instructions, environment, the rest off; "
+                 "Face Detection Options: on, notify, the rest off"])
+        run("setup-quiz", quiz_yml("q23.yml", name="Quiz 23", live_proctoring="Zoom", live_proctoring_code="pe2-zoom"),
+            has=["LockDown Browser required, no other site allowed; live proctoring over Zoom, start code pe2-zoom",
+                 "Require LockDown Browser; Allow instructor live proctoring -> Zoom, start code pe2-zoom"],
+            lacks=["Respondus Monitor"])
         broken = pathlib.Path(quiz_yml("bad.yml", name="Quiz 16", description=False))
         broken.write_text(broken.read_text().replace("\n\nquestions:", "\n  description: |\n    ```\n    open\n\nquestions:"))
         run("setup-quiz", str(broken), ok=False, has=["description: a block opened with ``` is never closed"],

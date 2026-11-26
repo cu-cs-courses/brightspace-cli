@@ -7,7 +7,8 @@ a fresh load; without --go nothing is written.
 
     bs-drive.py header   COURSE QUIZ --header FILE [--footer FILE] [--go]
     bs-drive.py visible  COURSE QUIZ [--hidden] [--go]
-    bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--[no-]monitor] [--[no-]second-camera] [--go]
+    bs-drive.py lockdown COURSE QUIZ --domains 'a.org, b.edu' [--off] [--[no-]monitor] [--[no-]second-camera]
+                         [--monitor-steps LIST] [--face-detection LIST] [--live-proctoring SYSTEM --live-code CODE] [--go]
     bs-drive.py special-access COURSE QUIZ --user 'First Last' [--only] [--go]
     bs-drive.py import   COURSE FILE.csv --section NAME [--go]
     bs-drive.py blanks   COURSE FILE.yml --section NAME [--go]
@@ -446,26 +447,70 @@ def open_settings(p, name):
 # camera, a phone that scans a QR code. Read off 100's Progress Exam 1, 2026-11-24.
 MONITOR = "findAll(e => e.tagName === 'INPUT' && e.name === 'monitorEnabled' && e.type === 'radio' && e.id.startsWith({}))[0]"
 SECOND = "findAll(e => e.tagName === 'INPUT' && e.id === 'secondCameraEnabled')[0]"
+# The startup sequence's steps that can be left out, by the names the YAML gives
+# them; the webcam check and face detection are always there. Face detection's
+# two options: stop a student starting, and tell one during the exam, when the
+# face cannot be seen. Live proctoring's video systems, as its menu names them.
+STEPS = {"instructions": "ADDITIONAL_INSTRUCTIONS_ENABLED", "guidelines": "VIDEO_GUIDELINES_ENABLED",
+         "photo": "FACE_PIC_CHECK_ENABLED", "id": "ID_CHECK_ENABLED", "environment": "ENV_CHECK_ENABLED"}
+FACE = {"block": "forceFacialDetection", "notify": "notifyFacialDetectionLoss"}
+SYSTEMS = {"zoom": "ZOOM", "teams": "TEAMS", "google meet": "GOOGLEMEET", "collaborate": "BBCOLLABORATE",
+           "webex": "WEBEX", "other": "OTHER"}
+BOX = "findAll(e => e.tagName === 'INPUT' && e.type === 'checkbox' && e.id === {})[0]"
+
+
+def names_list(text, known, what):
+    """A comma-separated list of names from known, or none for an empty list; exits on another."""
+    names = [x.strip().lower() for x in (text or "").split(",") if x.strip()]
+    if names == ["none"]:
+        return []
+    bad = [x for x in names if x not in known]
+    if bad:
+        sys.exit(f"{what}: {', '.join(bad)} is not one of {', '.join(known)}, or none")
+    return names
 
 
 def read_lockdown(p):
     p.click_pred("""e => e.tagName === 'A' && /Advanced Settings/i.test(e.textContent || '')""", settle=3, must=False)
-    return p.b.eval(f"""({{required: (findAll(e => e.tagName === 'INPUT' && e.name === 'ldbEnabled' && e.value === 'true')[0] || {{}}).checked,
+    got = p.b.eval(f"""({{required: (findAll(e => e.tagName === 'INPUT' && e.name === 'ldbEnabled' && e.value === 'true')[0] || {{}}).checked,
                         allow: (findAll(e => e.tagName === 'INPUT' && e.id === 'allowExternalDomains')[0] || {{}}).checked,
                         domains: (findAll(e => e.tagName === 'TEXTAREA' && e.id === 'externalDomains')[0] || {{}}).value,
                         monitor: (() => {{ const e = findAll(e => e.tagName === 'INPUT' && e.name === 'monitorEnabled' && e.type === 'radio' && e.checked)[0];
                                           return !e ? null : e.id.startsWith('monitorEnabledTrue_') ? 'required'
                                                  : e.id.startsWith('liveProctoringEnabled_') ? 'live proctoring' : 'not required'; }})(),
-                        second_camera: !!({SECOND} || {{}}).checked}})""")
+                        second_camera: !!({SECOND} || {{}}).checked,
+                        steps: {json.dumps(STEPS)}, face: {json.dumps(FACE)},
+                        system: (findAll(e => e.tagName === 'SELECT' && e.id === 'liveProctoringSystem')[0] || {{}}).value || '',
+                        code: (findAll(e => e.tagName === 'INPUT' && e.id === 'liveProctoringCode')[0] || {{}}).value || ''}})""")
+    # the boxes' ids above, turned into the names of those ticked
+    for key in ("steps", "face"):
+        got[key] = [n for n, i in got[key].items() if p.b.eval(f"!!({BOX.format(json.dumps(i))} || {{}}).checked")]
+    got["system"] = next((n for n, v in SYSTEMS.items() if v == got["system"]), "")
+    return got
 
 
-def set_monitor(b, p, monitor, second):
-    """Respondus Monitor required or not, and the second camera, on the settings page
-    as it stands; nothing saved. Exits, with nothing saved, when a box will not change."""
+def set_monitor(b, p, mode, second=None, steps=None, face=None, system=None, code=None):
+    """Proctoring on the settings page as it stands, nothing saved: mode is "required"
+    (Respondus Monitor), "not required", "live" (an instructor over a video system)
+    or None to leave it; with Monitor the startup steps and face detection, each a
+    list of the names on, and the second camera; with live proctoring the system and
+    the start code. Exits, with nothing saved, when anything will not change."""
     shown = lambda js: b.eval(f"(() => {{ const e = {js}; if (!e) return false; const r = e.getBoundingClientRect(); "
                               "return r.width > 0 && r.height > 0 && e.offsetParent !== null; })()")
-    if monitor is not None:
-        radio = MONITOR.format(json.dumps("monitorEnabledTrue_" if monitor else "monitorEnabledFalse_"))
+
+    def tick(js, want, what):
+        if bool(b.eval(f"({js} || {{}}).checked")) == want:
+            return
+        r = b.eval(f"(() => {{ const e = {js}; if (!e) return null; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()")
+        if not r:
+            sys.exit(f"no box for {what} on the page; nothing saved")
+        b.click_xy(r["x"], r["y"]); time.sleep(1)
+        if bool(b.eval(f"({js} || {{}}).checked")) != want:
+            sys.exit(f"the box for {what} did not change; nothing saved")
+
+    if mode is not None:
+        prefix = {"required": "monitorEnabledTrue_", "not required": "monitorEnabledFalse_", "live": "liveProctoringEnabled_"}[mode]
+        radio = MONITOR.format(json.dumps(prefix))
         if not b.eval(f"({radio} || {{}}).checked"):
             r = b.eval(f"(() => {{ const e = {radio}; if (!e) return null; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()")
             if not r:
@@ -477,7 +522,24 @@ def set_monitor(b, p, monitor, second):
             p.click_pred("e => /^(BUTTON|INPUT|A)$/.test(e.tagName) && /^Continue to Respondus Monitor/i.test((e.value || e.textContent || '').trim())"
                          " && e.getBoundingClientRect().width > 0", settle=2, must=False)
             if not b.eval(f"({radio} || {{}}).checked"):
-                sys.exit(f"Respondus Monitor did not become {'required' if monitor else 'not required'}; nothing saved")
+                sys.exit(f"proctoring did not become {mode}; nothing saved")
+    for names, boxes, what in ((steps, STEPS, "the startup step"), (face, FACE, "face detection's")):
+        for name, box in boxes.items():
+            if names is not None:
+                tick(BOX.format(json.dumps(box)), name in names, f"{what} {name}")
+    if system is not None:
+        SELECT = "findAll(e => e.tagName === 'SELECT' && e.id === 'liveProctoringSystem')[0]"
+        b.eval(f"""(() => {{ const e = {SELECT}; e.value = {json.dumps(SYSTEMS[system])};
+                   for (const t of ['input', 'change']) e.dispatchEvent(new Event(t, {{bubbles: true}})); }})()""")
+        time.sleep(1)
+        if b.eval(f"({SELECT} || {{}}).value") != SYSTEMS[system]:
+            sys.exit(f"the video system did not become {system}; nothing saved")
+    if code is not None:
+        CODE = "findAll(e => e.tagName === 'INPUT' && e.id === 'liveProctoringCode')[0]"
+        r = b.eval(f"(() => {{ const e = {CODE}; e.scrollIntoView({{block: 'center'}}); e.value = ''; e.focus(); return absOf(e); }})()")
+        b.click_xy(r["x"], r["y"]); b.insert(code); time.sleep(1)
+        if b.eval(f"{CODE}.value") != code:
+            sys.exit(f"the start code reads {b.eval(f'{CODE}.value')!r}, not {code!r}; nothing saved")
     if second is not None:
         # Folded under Monitor's own Advanced Settings, the link of that name after the
         # Monitor radios (LockDown's comes first), and there under Second Camera.
@@ -490,11 +552,7 @@ def set_monitor(b, p, monitor, second):
                          f"e.getBoundingClientRect().width > 0 && {after}", settle=2, must=False)
         if not shown(SECOND):
             sys.exit("the box requiring a second camera is not on the screen; nothing saved")
-        if bool(b.eval(f"{SECOND}.checked")) != second:
-            r = b.eval(f"(() => {{ const e = {SECOND}; e.scrollIntoView({{block: 'center'}}); return absOf(e); }})()")
-            b.click_xy(r["x"], r["y"]); time.sleep(2)
-            if bool(b.eval(f"{SECOND}.checked")) != second:
-                sys.exit("the box requiring a second camera did not change; nothing saved")
+        tick(SECOND, second, "a second camera")
 
 
 def verb_lockdown(a):
@@ -502,11 +560,22 @@ def verb_lockdown(a):
     domains = ", ".join(d.strip() for d in re.split(r"[,\n]", a.domains or "") if d.strip())
     if a.off and domains:
         sys.exit("--off takes no --domains")
-    if a.off and (a.monitor or a.second_camera):
-        sys.exit("Respondus Monitor runs inside LockDown Browser, so --off takes no --monitor or --second-camera")
-    if a.second_camera and a.monitor is False:
-        sys.exit("a second camera is Respondus Monitor's, so --second-camera takes Monitor, not --no-monitor")
-    monitor = True if a.second_camera else a.monitor
+    steps = None if a.monitor_steps is None else names_list(a.monitor_steps, STEPS, "--monitor-steps")
+    face = None if a.face_detection is None else names_list(a.face_detection, FACE, "--face-detection")
+    system = None if a.live_proctoring is None else a.live_proctoring.strip().lower()
+    if system is not None and system not in SYSTEMS:
+        sys.exit(f"--live-proctoring: {a.live_proctoring!r} is not one of {', '.join(SYSTEMS)}")
+    monitors = a.monitor or a.second_camera or steps is not None or face is not None
+    if a.off and (monitors or system):
+        sys.exit("Respondus Monitor and live proctoring run inside LockDown Browser, so --off takes neither")
+    if monitors and a.monitor is False:
+        sys.exit("--second-camera, --monitor-steps and --face-detection are Respondus Monitor's: not with --no-monitor")
+    if system and monitors:
+        sys.exit("live proctoring is instead of Respondus Monitor: --live-proctoring takes none of Monitor's flags")
+    if a.live_code is not None and not system:
+        sys.exit("--live-code is live proctoring's start code: it takes --live-proctoring")
+    mode = "live" if system else "required" if monitors else "not required" if a.monitor is False else None
+    monitor = {"required": True, "not required": False}.get(mode)
     b, p = session(ou, qi, height=1400, respondus=True)
     try:
         rows = respondus_row(p, name)
@@ -518,13 +587,18 @@ def verb_lockdown(a):
         if a.json:
             print(json.dumps(have)); return
         print(f"now: required={have['required']} external domains allowed={have['allow']} domains={have['domains']!r} "
-              f"monitor={have['monitor']} second camera={have['second_camera']}")
+              f"monitor={have['monitor']} second camera={have['second_camera']}"
+              f" steps={','.join(have['steps']) or 'none'} face={','.join(have['face']) or 'none'}"
+              + (f" system={have['system']} code={have['code']!r}" if have['monitor'] == 'live proctoring' else ""))
         if "\n" in (have["domains"] or ""):
             print("  (stored with newlines: LockDown then opens each site's first page and nothing behind it)")
         if not a.go:
             print(f"would set: required={not a.off} domains={domains!r}"
-                  + (f" monitor={'required' if monitor else 'not required'}" if monitor is not None else "")
+                  + (f" proctoring={mode}" if mode else "")
                   + (f" second camera={a.second_camera}" if a.second_camera is not None else "")
+                  + (f" steps={','.join(steps) or 'none'}" if steps is not None else "")
+                  + (f" face={','.join(face) or 'none'}" if face is not None else "")
+                  + (f" system={system}" if system else "") + (f" code={a.live_code!r}" if a.live_code is not None else "")
                   + "; nothing written; add --go"); return
         p.click_pred(f"""e => e.tagName === 'INPUT' && e.name === 'ldbEnabled' && e.value === {json.dumps('false' if a.off else 'true')}""", settle=2, what="the Require radio")
         if not a.off:
@@ -557,8 +631,8 @@ def verb_lockdown(a):
             b.insert(domains); time.sleep(1)
             if b.eval(f"{BOX}.value").strip() != domains:
                 sys.exit(f"the sites box reads {b.eval(f'{BOX}.value')!r}, not {domains!r}; nothing saved")
-        if not a.off and (monitor is not None or a.second_camera is not None):
-            set_monitor(b, p, monitor, a.second_camera)
+        if not a.off and mode:
+            set_monitor(b, p, mode, a.second_camera, steps, face, system, a.live_code)
         p.click_pred("""e => (e.tagName === 'INPUT' || e.tagName === 'BUTTON' || e.tagName === 'A') && /Save \\+ Close/.test(e.value || e.textContent || '')""", settle=10, what="Save + Close")
         print("row after save:", (respondus_row(p, name) or ["?"])[0])
     finally:
@@ -571,11 +645,21 @@ def verb_lockdown(a):
     finally:
         b.close()
     print(f"checked on the server: required={got['required']} external domains allowed={got['allow']} domains={got['domains']!r} "
-          f"monitor={got['monitor']} second camera={got['second_camera']}")
+          f"monitor={got['monitor']} second camera={got['second_camera']}"
+          f" steps={','.join(got['steps']) or 'none'} face={','.join(got['face']) or 'none'}"
+          + (f" system={got['system']} code={got['code']!r}" if got['monitor'] == 'live proctoring' else ""))
     ok = (got["required"] is (not a.off)) and (a.off or (got["domains"] == domains and got["allow"] if domains
                                                     else not got["allow"]))
-    if not a.off and monitor is not None:
-        ok &= got["monitor"] == ("required" if monitor else "not required")
+    if not a.off and mode:
+        ok &= got["monitor"] == {"live": "live proctoring"}.get(mode, mode)
+    if not a.off and steps is not None:
+        ok &= sorted(got["steps"]) == sorted(steps)
+    if not a.off and face is not None:
+        ok &= sorted(got["face"]) == sorted(face)
+    if not a.off and system:
+        ok &= got["system"] == system
+    if not a.off and a.live_code is not None:
+        ok &= got["code"] == a.live_code
     if not a.off and a.second_camera is not None:
         ok &= got["second_camera"] is a.second_camera
     if not ok:
@@ -1239,6 +1323,13 @@ def main():
                    help="require Respondus Monitor, or with --no-monitor not; left alone without either")
     s.add_argument("--second-camera", dest="second_camera", action=argparse.BooleanOptionalAction,
                    help="require a second camera, which is Monitor's; left alone without either")
+    s.add_argument("--monitor-steps", dest="monitor_steps", metavar="'instructions, environment'",
+                   help="the startup steps on, the rest off: " + ", ".join(STEPS) + "; or none")
+    s.add_argument("--face-detection", dest="face_detection", metavar="'block, notify'",
+                   help="face detection's options on, the rest off: block (no start), notify (during); or none")
+    s.add_argument("--live-proctoring", dest="live_proctoring", metavar="SYSTEM",
+                   help="an instructor proctoring over " + ", ".join(SYSTEMS) + ", instead of Monitor")
+    s.add_argument("--live-code", dest="live_code", metavar="CODE", help="live proctoring's start code")
     s.add_argument("--json", action="store_true", help="print the setting as JSON and change nothing")
     s.set_defaults(fn=verb_lockdown)
     s = sub.add_parser("special-access", help="put one user on the quiz's special access list"); common(s)
